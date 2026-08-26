@@ -1,0 +1,22 @@
+# Secrets — NEVER commit
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Telegram sessions
+sessions/
+*.session
+*.session-journal
+
+# Local tooling
+.ruff_cache/
+.mypy_cache/

@@ -1,0 +1,1 @@
+# Package marker: unit tests (run with `pytest` from the project root).

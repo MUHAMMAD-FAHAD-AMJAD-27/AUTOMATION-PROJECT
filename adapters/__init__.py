@@ -1,0 +1,1 @@
+# Package marker: ingestion adapters (telegram, social/stealth).

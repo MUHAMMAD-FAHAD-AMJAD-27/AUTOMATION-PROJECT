@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Audit trail (Discovery):
+    deliverable: freebies pipeline ops dashboard (Next.js 14 App Router)
+    audience: single operator, personal use
+    direction: Dense / Professional, dark ops tool
+    skeleton: design-skeletons/dashboard (layout DNA: fixed sidebar, topbar,
+              KPI row, paired panels) — dark tokens per craft/color rules,
+              accent = bronze #D8B46A (no default indigo/cyan/trust gradient)
+    font stack: Segoe UI Variable + Cascadia Code mono for numerals/ids
+                (local faces only — builds offline; craft typography pairing)
+*/
+
+:root {
+  color-scheme: dark;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background-color: #0b0e13;
+  color: #e6e9ee;
+  font-feature-settings: "cv02", "cv03", "cv04", "ss01";
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(216, 180, 106, 0.3);
+}
+
+/* Numeric alignment — dashboards run on columns of numbers */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, monospace;
+}
+
+/* Focus visibility: never remove outlines, ring on :focus-visible only */
+:focus-visible {
+  outline: 2px solid #d8b46a;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Subtle scrollbar for the dark shell */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+}
+
+a {
+  color: inherit;
+}
+
+@layer components {
+  .kbd-hint {
+    @apply font-mono text-[10px] tracking-caps text-muted uppercase;
+  }
+}
