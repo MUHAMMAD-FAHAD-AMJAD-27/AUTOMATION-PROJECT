@@ -7,7 +7,22 @@ import psycopg
 from psycopg.rows import dict_row
 from dotenv import load_dotenv
 
+# load_dotenv(override=True) lets .env win over the real shell/host environment.
+# An EMPTY placeholder line in .env (e.g. `SERPER_API_KEY=`) therefore silently
+# BLANKS a value the operator exported in the shell — the same footgun class as
+# DATABASE_URL. Capture the shell value first and restore it if (and only if)
+# .env blanked it; a genuine non-empty .env value still wins, so normal override
+# semantics are unchanged.
+#
+# SCOPE: only SERPER_API_KEY is guarded here. The same hazard affects every other
+# key that ships EMPTY in .env — TG_API_ID, TG_API_HASH, TG_PHONE, TG_PASSWORD,
+# GITHUB_TOKEN, DASHBOARD_API_KEY — and the other load_dotenv(override=True)
+# call sites (scheduler.py, crawler/verifier.py). Those are intentionally left
+# alone for now; extending this guard to them is a separate change.
+_shell_serper = os.environ.get("SERPER_API_KEY")
 load_dotenv(override=True)
+if (_shell_serper or "").strip() and not (os.environ.get("SERPER_API_KEY") or "").strip():
+    os.environ["SERPER_API_KEY"] = _shell_serper
 
 
 def get_database_url() -> str:
