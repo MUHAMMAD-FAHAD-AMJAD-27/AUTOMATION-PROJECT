@@ -140,7 +140,100 @@ QUERY_TEMPLATES: list[tuple[str, str]] = [
     ("curated_deal_hubs", "site:saasmantra.com AI tool discount code"),
     ("curated_deal_hubs", "site:alternativeto.net free open source alternative developer"),
     ("curated_deal_hubs", "site:alternativeto.net free tier AI coding tool"),
+
+    # --- LLM-aggregator OSINT sweep (added 2026-08-26) ------------------------ #
+    # Aggregators = one key, many models. These find the aggregator itself, not
+    # an individual provider's free tier, so they complement the ai_apis /
+    # llm_api_drop tags rather than duplicating them.
+    ("llm_aggregator",    "best OpenRouter alternatives free tier comparison"),
+    # Brand-probe. OmniRoute is a real, well-documented aggregator, so it is
+    # wired as a named target. Deliberately NOT wired: gorouter.app (unverified
+    # beyond "probably a rebranded QuantumNous/new-api instance"), true-sota.com
+    # (unverifiable, title-only) and "SeekAI" (does not exist as an LLM
+    # aggregator — a query naming it would only manufacture false positives).
+    ("llm_aggregator",    "OmniRoute unified LLM API free tier models router"),
+
+    # ── Chinese-market aggregators / 中转 / genuine free domestic tiers ──
+    ("llm_aggregator_cn", "大模型 API 聚合 一个 key 多个模型 免费额度"),
+    ("llm_aggregator_cn", "OpenAI API 中转站 免费 Claude API 代理 镜像站"),
+    ("llm_aggregator_cn", "免费大模型 API 接口 GLM 智谱 Kimi Moonshot 免费额度 领取"),
+    ("llm_aggregator_cn", "国产大模型 免费 API 额度 对比 智谱 通义千问 DeepSeek 硅基流动"),
+    ("llm_aggregator_cn", "one-api new-api 开源 大模型网关 令牌分发 中转"),
+
+    # ── Regional (India / SEA / JP / KR) ──
+    # ja and ko were total locale gaps before this block; an English-language
+    # Japan/Korea probe was tried and returned nothing, so these are
+    # native-language only by design.
+    ("llm_aggregator_intl", "India LLM API aggregator unified model router UPI rupee"),
+    ("llm_aggregator_intl", "Southeast Asia LLM API gateway free tier Singapore Indonesia"),
+    ("llm_aggregator_intl", "LLM API まとめ 無料 複数モデル 統合 ゲートウェイ"),
+    ("llm_aggregator_intl", "무료 LLM API 통합 여러 모델 하나의 키 게이트웨이"),
+
+    # ── Curated free-API lists (NOTE: overlaps github_adapter TARGETS by
+    # design — the adapter parses the lists it already knows about, these
+    # discover lists it does not. Dedup happens downstream on canonical_url.) ──
+    ("free_api_lists",    "awesome free llm api github list maintained providers rate limits"),
+    ("free_api_lists",    "directory of free AI APIs unlimited free LLM models list"),
+
+    # ── Reliability / fraud signal → intended to feed a SUPPRESSION list, NOT
+    # the offer feed. Tagged aggregator_fraud and excluded from every default
+    # path; see NEVER_INGEST_TAGS below for why that exclusion is mandatory. ──
+    ("aggregator_fraud",  "LLM API relay gateway exit scam refund not working review"),
+    ("aggregator_fraud",  "中转站 跑路 骗局 假模型 降智 用户评价"),
+
+    # ── Serper-only bucket. site:/OR/quoted syntax is unsupported or silently
+    # ignored by DuckDuckGo, so these return junk or nothing under the default
+    # ddg engine. Gated by SERPER_ONLY_TAGS below — never in the ddg set. ──
+    ("llm_aggregator_serper", "site:github.com awesome free llm api providers rate limits"),
+    ("llm_aggregator_serper", "site:news.ycombinator.com Show HN LLM router gateway free"),
+    ("llm_aggregator_serper", "site:reddit.com/r/LocalLLaMA free API aggregator many models"),
 ]
+
+# --------------------------------------------------------------------------- #
+# Tags that must NOT run under the default template set.
+# --------------------------------------------------------------------------- #
+# Engine gate. These queries rely on site:/OR/quoted operators that the ddgs
+# (DuckDuckGo) backend does not honour — under ddg they degrade to zero or
+# irrelevant results and silently burn a query slot. Included only when the
+# resolved engine is "serper".
+SERPER_ONLY_TAGS: frozenset[str] = frozenset({"llm_aggregator_serper"})
+
+# Safety gate. These queries surface scam/complaint writeups ABOUT aggregators —
+# they are reliability signal, not offers. run_deep_web() calls upsert_raw_item()
+# on EVERY result regardless of category_tag (see the write loop below: there is
+# no tag-aware suppression stage anywhere in the pipeline yet), so any code path
+# that reaches run_deep_web with these templates injects scam-report URLs
+# straight into raw_items and onward to the offer feed.
+#
+# NOTE ON A DELIBERATE DEVIATION: the brief asked for these to be "reachable
+# only via all_deals (orphan-tag pattern)". That is not achievable as stated —
+# all_deals resolves to the FULL template list, so reaching them via all_deals
+# is exactly what puts them into upsert_raw_item. The absolute requirement
+# ("must NEVER flow into the offer feed") wins over the routing preference, so
+# they are excluded from all_deals too and are reachable only by an explicit
+# `--category aggregator_fraud` CLI run — a deliberate human act the scheduler
+# never performs. Drop this frozenset to one line to reverse that once a real
+# suppression consumer exists.
+NEVER_INGEST_TAGS: frozenset[str] = frozenset({"aggregator_fraud"})
+
+
+def _excluded_tags(engine: str) -> set[str]:
+    """Tags to strip from any default/all_deals template selection."""
+    excluded = set(NEVER_INGEST_TAGS)
+    if engine != "serper":
+        excluded |= SERPER_ONLY_TAGS
+    return excluded
+
+
+def default_templates(engine: str | None = None) -> list[tuple[str, str]]:
+    """QUERY_TEMPLATES minus the tags gated off for this engine.
+
+    This is the *only* thing that should be used as a default template set;
+    referencing QUERY_TEMPLATES directly bypasses both gates.
+    """
+    engine = engine or os.environ.get("DEEP_WEB_ENGINE", "ddg")
+    excluded = _excluded_tags(engine)
+    return [(t, q) for t, q in QUERY_TEMPLATES if t not in excluded]
 
 
 # --------------------------------------------------------------------------- #
@@ -156,29 +249,61 @@ RUN_CATEGORY_TO_TAGS: dict[str, list[str]] = {
     "open_source_repo": ["open_source"],
     "coding_agents":    ["ai_apis"],
     "coupon":           ["promo_code_drops"],
-    "llm_api_drop":     ["llm_api_drop", "api_drops_primary"],
-    "ai_tools":         ["ai_apis", "api_drops_primary"],
-    "all_deals":        [],  # all templates
+    "llm_api_drop":     ["llm_api_drop", "api_drops_primary",
+                         "llm_aggregator", "llm_aggregator_cn",
+                         "llm_aggregator_intl", "free_api_lists"],
+    "ai_tools":         ["ai_apis", "api_drops_primary", "llm_aggregator"],
+    "all_deals":        [],  # all templates (minus gated tags — see default_templates)
 }
+# aggregator_fraud and llm_aggregator_serper are intentionally absent from every
+# value above. Do not add them: the first would inject scam writeups into the
+# offer feed, the second returns nothing under the default ddg engine.
 
 
-def templates_for_run_category(run_category: str) -> list[tuple[str, str]]:
-    """Return the (tag, query) templates a scheduler run-category should search."""
+def templates_for_run_category(
+    run_category: str, engine: str | None = None
+) -> list[tuple[str, str]]:
+    """Return the (tag, query) templates a scheduler run-category should search.
+
+    Gated tags are stripped in both branches: an explicit tag list can't request
+    a gated tag (none of them appear in RUN_CATEGORY_TO_TAGS), and the empty-list
+    "all templates" branch goes through default_templates() rather than the raw
+    QUERY_TEMPLATES so all_deals cannot pull in fraud or serper-only queries.
+    """
     tags = RUN_CATEGORY_TO_TAGS.get(run_category, [])
     if not tags:
-        return list(QUERY_TEMPLATES)
-    return [(cat, q) for cat, q in QUERY_TEMPLATES if cat in tags]
+        return default_templates(engine)
+    excluded = _excluded_tags(engine or os.environ.get("DEEP_WEB_ENGINE", "ddg"))
+    return [(cat, q) for cat, q in QUERY_TEMPLATES if cat in tags and cat not in excluded]
 
 
 # Import-time guard: warn about query tags that no run-category can ever reach
 # (e.g. `curated_deal_hubs`, `vps_hosting`) — they only fire under `all_deals`.
+# Tags in SERPER_ONLY_TAGS / NEVER_INGEST_TAGS are excluded deliberately and are
+# NOT reachable via all_deals either, so they are reported separately rather than
+# as accidental orphans — otherwise the real signal here gets drowned out.
 _reachable_tags = {t for tags in RUN_CATEGORY_TO_TAGS.values() for t in tags}
 _all_tags = {cat for cat, _ in QUERY_TEMPLATES}
-_orphan_tags = _all_tags - _reachable_tags
+_gated_tags = SERPER_ONLY_TAGS | NEVER_INGEST_TAGS
+_orphan_tags = _all_tags - _reachable_tags - _gated_tags
 if _orphan_tags:
     log.warning(
         "deep_web query tags only reachable via all_deals (no dedicated run-category): %s",
         ", ".join(sorted(_orphan_tags)),
+    )
+if _gated_tags & _all_tags:
+    log.info(
+        "deep_web gated tags (excluded from all default paths by design): %s",
+        ", ".join(sorted(_gated_tags & _all_tags)),
+    )
+# Fail loudly if a gated tag ever gets wired into a run-category — that would
+# silently defeat the gate for every scheduler slot using that category.
+_leaked = _gated_tags & _reachable_tags
+if _leaked:
+    raise RuntimeError(
+        f"gated deep_web tags wired into RUN_CATEGORY_TO_TAGS: {sorted(_leaked)}. "
+        "aggregator_fraud must never reach upsert_raw_item; llm_aggregator_serper "
+        "returns nothing under the default ddg engine."
     )
 
 
@@ -311,18 +436,44 @@ async def run_deep_web(
     """``max_items`` caps total raw_items written across all query templates in one
     run (None = uncapped, for manual CLI). The scheduler passes a cap so ingestion
     can't outrun the pipeline's per-slot drain rate."""
-    templates = templates or QUERY_TEMPLATES
-    if category_filter:
-        templates = [(cat, q) for cat, q in templates if cat == category_filter]
-        if not templates:
-            log.warning("No templates found for category %r", category_filter)
-            return 0
-
     engine = engine or os.environ.get("DEEP_WEB_ENGINE", "ddg")
     serper_key = os.environ.get("SERPER_API_KEY", "")
     if engine == "serper" and not serper_key:
         log.error("engine=serper but SERPER_API_KEY not set; falling back to DDG")
         engine = "ddg"
+
+    # Engine is resolved BEFORE templates so the gates see the *effective* engine,
+    # including the serper->ddg downgrade above — otherwise a keyless serper run
+    # would fall back to ddg while still carrying the serper-only queries.
+    if category_filter:
+        # An explicit single-tag request is a deliberate human act, so it is
+        # allowed to select a gated tag (this is the only way to reach
+        # aggregator_fraud, e.g. `--category aggregator_fraud`).
+        templates = [
+            (cat, q) for cat, q in (templates or QUERY_TEMPLATES) if cat == category_filter
+        ]
+        if not templates:
+            log.warning("No templates found for category %r", category_filter)
+            return 0
+    else:
+        # default_templates(), never raw QUERY_TEMPLATES — the raw list contains
+        # the fraud and serper-only buckets.
+        templates = templates or default_templates(engine)
+        # Re-apply the gate to CALLER-SUPPLIED templates as well. scheduler.py
+        # always passes templates= explicitly, and templates_for_run_category()
+        # resolved the engine from the env BEFORE run_deep_web's serper->ddg
+        # downgrade could happen — so `DEEP_WEB_ENGINE=serper` with no
+        # SERPER_API_KEY would otherwise hand us the 3 site:-bearing queries and
+        # then execute them under ddg. Gating at the point of use makes this
+        # independent of how careful the caller was.
+        excluded = _excluded_tags(engine)
+        dropped = [(c, q) for c, q in templates if c in excluded]
+        if dropped:
+            log.warning(
+                "dropped %d gated template(s) for engine=%s: %s",
+                len(dropped), engine, sorted({c for c, _ in dropped}),
+            )
+            templates = [(c, q) for c, q in templates if c not in excluded]
 
     seen_hashes: set[str] = set()
     total = 0
