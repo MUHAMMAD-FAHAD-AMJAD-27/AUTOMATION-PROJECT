@@ -47,30 +47,37 @@ batch + idempotent, so it belongs in Scheduler one-offs — which only burn dyno
 
 ```procfile
 web: npm --prefix dashboard run start
-worker: python -m crawler.worker
+# worker: python -m crawler.worker      # superseded by scheduler — kept recoverable
+scheduler: python scheduler.py
 ```
 
-`web` stays commented out / unscaled until the dashboard exists — scaling `web` up would
-burn dyno hours for nothing.
+`scheduler` is the only process scaled up. `worker` is commented out rather than
+deleted so it stays recoverable (re-enable it only if the Telegram realtime monitor
+is ever given working credentials). `web` stays unscaled until the dashboard exists —
+scaling `web` up would burn dyno hours for nothing.
 
 ### Add-on configuration
 
 | Add-on | Plan | $/mo | Why |
 |---|---|---|---|
-| `heroku-postgresql` | `mini` | $5 | 1 GB, 10 conns — plenty for single-user offer store |
+| ~~`heroku-postgresql`~~ | — | **$0** | **Not used. Neon is the permanent DB — do not provision.** |
 | `heroku-redis` | `mini` | $5 | 100 MB — rate buckets, dedup scratch |
-| `heroku-scheduler` | free | $0 | cron-ish one-offs (10 min / hourly / daily) |
-| **Eco dynos** | 1000 h/mo | $5 | shared pool: worker 744 h + one-offs ≈ 780–800 h |
+| `heroku-scheduler` | free | $0 | not required; the 27 slots run in-process |
+| **Eco dynos** | 1000 h/mo | $5 | shared pool: scheduler 744 h ≈ 74% of pool |
 
 **Monthly burn ≈ $15 → covered by your $290.28 credits for ~19 months.**
 
 ### Config vars (never in git)
 
 ```
-DATABASE_URL          <- injected automatically by the Postgres add-on
+DATABASE_URL          <- SET MANUALLY to the existing Neon pooler URL.
+                         NOT injected by an add-on. Never provision a new Postgres.
 REDIS_URL             <- injected by the Redis add-on
-DISCORD_WEBHOOK_URL   <- your webhook
-TG_API_ID / TG_API_HASH / TG_PHONE / TG_PASSWORD
+LLM_API_KEY / LLM_BASE_URL / LLM_MODEL      <- required; the pipeline cannot extract without these
+LLM_FALLBACK_1_* / LLM_FALLBACK_2_*         <- optional provider fallback chain
+DISCORD_WEBHOOK_URL   <- your webhook (plus optional per-category DISCORD_WEBHOOK_<CATEGORY>)
+TG_API_ID / TG_API_HASH / TG_PHONE / TG_PASSWORD   <- Telegram only; blank = adapter skipped
+FIRECRAWL_API_KEY     <- required by the firecrawl adapter
 PROXY_URL             <- residential proxy (social adapters; optional at start)
 GITHUB_TOKEN          <- free PAT (no scopes); raises GitHub API limit to 5 000 req/hr
 DASHBOARD_API_KEY     <- Phase 4
@@ -78,30 +85,62 @@ DASHBOARD_API_KEY     <- Phase 4
 
 ### Deploy steps
 
+> ⚠️ **DO NOT provision a new Postgres instance — doing so orphans all live
+> production data.** The system's database is a **permanent, existing Neon
+> instance** that already holds live `raw_items`, `offers`, `dispatches`,
+> `sources` and `runs`. There is no `heroku addons:create heroku-postgresql`
+> step and no `schema.sql` load: the schema is already applied on Neon. Point
+> `DATABASE_URL` at Neon and verify connectivity **before** deploying.
+
 ```bash
-git init && git add -A && git commit -m "phase 2"
+git add -A && git commit -m "deploy"            # repo already initialised
 heroku create freebies-hunter --region us --stack heroku-24
-heroku addons:create heroku-postgresql:mini
-heroku addons:create heroku-redis:mini
-heroku config:set TG_API_ID=... TG_API_HASH=... TG_PHONE=... DISCORD_WEBHOOK_URL=...
+
+# --- Database: point at the EXISTING Neon instance. Do NOT provision one. ---
+# Copy the pooler URL from .env (Neon console -> Connection string -> Pooled).
+heroku config:set DATABASE_URL="postgresql://<user>:<pass>@<endpoint>-pooler.<region>.aws.neon.tech/neondb?sslmode=require"
+
+# Confirm connectivity with a READ-ONLY query before going further.
+# Expect non-zero counts; zeros mean you are pointed at the wrong database.
+heroku run "python -c \"import os,psycopg; c=psycopg.connect(os.environ['DATABASE_URL']); \
+print(c.execute('select count(*) from raw_items').fetchone(), \
+      c.execute('select count(*) from offers').fetchone())\""
+
+heroku config:set LLM_API_KEY=... LLM_BASE_URL=... LLM_MODEL=...
+heroku config:set DISCORD_WEBHOOK_URL=...
 heroku config:set DISABLE_COLLECTSTATIC=1         # python buildpack hygiene
-heroku ps:scale worker=1:eco web=0                # only the worker runs
+heroku ps:scale scheduler=1:eco worker=0 web=0    # scheduler is the only always-on process
 git push heroku main
-heroku run "psql $DATABASE_URL -f schema.sql"     # one-time schema load
 ```
 
 Then add the Scheduler jobs (dashboard UI → Resources → Heroku Scheduler → Add job).
 
 ### Dyno-hour budgeting (stay inside 1000 h/mo)
 
-- Worker 24/7 = **744 h**.
-- Scheduler one-offs: each pipeline run ≈ 5–20 min × 3/day ≈ 30 h; dispatcher runs
-  ≈ 10 min × 3/day ≈ 15 h. Total ≈ **790 h/mo ✅**.
-- Do **not** add extra always-on dynos (each costs ~744 h/mo).
-- Eco dynos sleep on inactivity; the Telegram monitor's own traffic keeps the worker
-  nominal, but if Eco sleeping bites, the fix is `heroku ps:scale worker=1:standard-1x`
-  ($0.25/h ≈ $182/mo — only if the credits budget justifies it; prefer Scheduler batch
-  mode instead).
+**`scheduler` is the single always-on process.** It supersedes `worker`: the 27-slot
+orchestrator already runs every ingest adapter *and* the pipeline *and* dispatch
+(`scheduler.py:99-127`), whereas `worker` only ingests and never calls the pipeline.
+The one thing `worker` did that `scheduler` does not is the Telegram realtime
+monitor, which is credential-dead (blank `TG_*` in `.env`) and now degrades to a
+logged skip rather than a crash.
+
+- `scheduler` 24/7 = **744 h/mo**.
+- `worker` scaled to 0 = **0 h** (was 744 h).
+- `web` scaled to 0 = **0 h** until the dashboard ships.
+- No Heroku Scheduler one-offs needed: the 27 slots are in-process, so the former
+  ≈45 h of pipeline/dispatcher one-offs drops to **0 h**.
+
+**Total ≈ 744 h/mo of the 1000 h Eco pool (74%), leaving ~256 h headroom** — down
+from the previous ≈790 h estimate, and now with no second always-on dyno.
+
+- Do **not** add extra always-on dynos (each costs ~744 h/mo). Running `scheduler`
+  and `worker` together would be ≈1488 h and **exceeds the pool**.
+- Eco dynos sleep on inactivity. The scheduler fires a slot every ~53 min
+  (`MINUTES_PER_SLOT = 53.33`), and one slot's unconditional ingest measures
+  **18.8 min** of continuous work, so the dyno is never idle long enough to be a
+  concern. If Eco sleeping does bite, the fix is
+  `heroku ps:scale scheduler=1:standard-1x` ($0.25/h ≈ $182/mo — only if the
+  credits budget justifies it).
 
 ---
 

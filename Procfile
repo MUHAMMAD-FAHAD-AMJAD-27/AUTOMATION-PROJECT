@@ -13,15 +13,16 @@
 #   scheduler -> 27-slot orchestrator: per-category ingest + pipeline + dispatch.
 #                This is the ONLY process that turns raw_items into sent offers.
 #
-# NOTE: one always-on dyno ≈ 730 hrs/month, so running worker AND scheduler
-#       together (~1460 hrs) exceeds the 1000-hr Eco pool. See DEPLOYMENT notes —
-#       scheduler supersedes worker for everything except the Telegram realtime
-#       monitor; pick one always-on process unless on a paid tier.
+# NOTE: one always-on dyno ≈ 744 hrs/month against a 1000-hr Eco pool, so only
+#       ONE always-on process runs. `scheduler` supersedes `worker`: it runs every
+#       ingest adapter AND the pipeline AND dispatch, whereas `worker` only ingests.
+#       `worker` is commented out (not deleted) so it stays recoverable — re-enable
+#       it only if the Telegram realtime monitor is given working credentials.
 #
 # One-off jobs (add via the FREE Heroku Scheduler add-on, NOT as dynos):
 #   python -m crawler.pipeline route=ingest        (3x daily)
 #   python discord_dispatcher.py --limit 10         (before/after each ingest)
 # ============================================================================
 web: npm --prefix dashboard run start
-worker: python -m crawler.worker
+# worker: python -m crawler.worker
 scheduler: python scheduler.py
