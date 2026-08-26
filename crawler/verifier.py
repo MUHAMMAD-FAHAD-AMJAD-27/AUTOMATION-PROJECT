@@ -495,6 +495,12 @@ class LLMExtractor:
         payload = {
             "model": provider.model,
             "temperature": 0,
+            # Batch extraction is mechanical (parse posts -> JSON in a fixed
+            # shape), not a hard reasoning task. Ask reasoning-capable models for
+            # minimal thinking to cut latency and token cost. OpenRouter drops
+            # unsupported params by default, so non-reasoning providers ignore
+            # it rather than erroring.
+            "reasoning_effort": "low",
             "response_format": {"type": "json_object"},
             "messages": [
                 {
