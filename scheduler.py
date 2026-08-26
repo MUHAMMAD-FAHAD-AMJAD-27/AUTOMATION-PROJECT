@@ -80,6 +80,14 @@ MINUTES_PER_SLOT = 1440 / TOTAL_SLOTS  # 53.333...
 PIPELINE_LIMIT_PER_RUN = 30  # raw items to process per category run
 ADAPTER_LIMIT_PER_RUN = 50   # items fetched per adapter pre-run
 
+# github_adapter is capped PER REPO, not globally. ADAPTER_LIMIT_PER_RUN is a
+# single counter consumed in TARGETS order, and ripienaar/free-for-dev (first in
+# the list) alone parses 1237 entries — so the old ADAPTER_LIMIT_PER_RUN=50 never
+# opened targets 1-15 and all 11 LLM-aggregator repos were unreachable in
+# production. Measured 2026-08-26: sum(min(entries, 25)) over the 16 targets =
+# 253 items/run, vs ~1726 for a global cap big enough to reach the tail.
+GITHUB_MAX_PER_TARGET = 25
+
 
 # --------------------------------------------------------------------------- #
 # Slot math
@@ -176,15 +184,21 @@ def _run_openrouter(category: str) -> None:
 def _run_github(category: str, run_number: int) -> None:
     """Curated mega-lists change slowly, so run once/day (run 1) on the OSS lane.
 
-    Capped by ADAPTER_LIMIT_PER_RUN — free-for-dev alone yields thousands of
-    links and would otherwise flood raw_items past the pipeline's drain rate."""
+    Capped PER REPO (GITHUB_MAX_PER_TARGET), not globally: a global cap is one
+    counter spent in TARGETS order, so free-for-dev's 1237 entries consumed the
+    whole budget and starved every repo behind it — including all 11 LLM-aggregator
+    lists. Per-target is order-independent and bounded at
+    len(TARGETS) * GITHUB_MAX_PER_TARGET."""
     if category not in ("open_source_repo", "all_deals"):
         return
     if run_number != 1:
         return
     try:
         from adapters.github_adapter import run_github
-        asyncio.run(run_github(max_items=ADAPTER_LIMIT_PER_RUN))
+        asyncio.run(run_github(
+            max_items=None,
+            max_per_target=GITHUB_MAX_PER_TARGET,
+        ))
     except Exception as exc:
         log.warning("github adapter failed: %s", exc)
 

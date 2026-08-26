@@ -55,10 +55,11 @@ TARGETS: list[tuple[str, str, str, str]] = [
     # --- LLM-aggregator / free-API curated lists (added 2026-08-26) ------------ #
     # Verified to resolve with a root README.md before wiring. The §5.4 denylist
     # repos (cheahjs/* 404, alistaitsacle/* ToS-disabled, dan1471/* stolen keys)
-    # are deliberately excluded. NOTE: the worker runs run_github() UNCAPPED, so
-    # ordering here is irrelevant to it; the scheduler's capped OSS slot (max=50)
-    # exhausts its budget on free-for-dev first and will not reach these — that is
-    # tracked as a Step-3 scheduler-cap fix, not a github_adapter change.
+    # are deliberately excluded. Ordering here is NOT load-bearing: the worker
+    # runs run_github() uncapped, and the scheduler now passes max_per_target
+    # instead of a global max_items, so no repo can starve the ones behind it.
+    # (It could before: a global cap of 50 was fully consumed by free-for-dev's
+    # 1237 entries and none of the repos below were ever reached in production.)
     #
     # Every entry below was fetched read-only through _fetch_file_content and
     # parsed with the real _parse_markdown(min_section_filter=True); the trailing
@@ -245,13 +246,23 @@ async def run_github(
     targets: list[tuple[str, str, str, str]] | None = None,
     dry_run: bool = False,
     max_items: int | None = None,
+    max_per_target: int | None = None,
 ) -> int:
     """Ingest curated mega-lists.
 
     ``max_items`` caps total raw_items written across ALL targets in one run
-    (None = uncapped, for manual CLI runs). The scheduler passes a cap because
-    a single list like free-for-dev yields thousands of links — without it,
-    ingestion floods raw_items far faster than the pipeline can drain it.
+    (None = uncapped, for manual CLI runs).
+
+    ``max_per_target`` caps raw_items written per INDIVIDUAL target. Prefer this
+    over ``max_items`` for scheduled runs: because ``max_items`` is a single
+    global counter consumed in TARGETS order, a head-of-list repo that yields
+    thousands of links starves every target behind it. Measured 2026-08-26:
+    ripienaar/free-for-dev alone parses 1237 entries, so the old
+    ``max_items=50`` never opened targets 1-15 at all and the 11 LLM-aggregator
+    repos were dead on arrival. A global cap large enough to reach the tail
+    (>1644) would ingest ~1726 items/run — 4.3x the pipeline's whole daily drain
+    capacity. A per-target cap is order-independent and bounded at
+    len(TARGETS) * max_per_target, so adding a target can never starve another.
     """
     targets = targets or TARGETS  # type: ignore[assignment]
     token = os.environ.get("GITHUB_TOKEN")
@@ -281,17 +292,27 @@ async def run_github(
             log.info("%s -> %d entries parsed", full_name, len(entries))
 
             try:
+                written_here = 0
                 for entry in entries:
                     if max_items is not None and total >= max_items:
+                        break
+                    if max_per_target is not None and written_here >= max_per_target:
+                        log.info(
+                            "%s -> per-target cap %d reached (%d entries parsed, %d skipped)",
+                            full_name, max_per_target, len(entries),
+                            len(entries) - written_here,
+                        )
                         break
                     payload = _entry_to_payload(entry, full_name)
                     if dry_run:
                         print(json.dumps(payload, ensure_ascii=False, indent=2))
                         total += 1
+                        written_here += 1
                         continue
                     with connect() as conn:
                         upsert_raw_item(conn, source_id, entry.url, payload)
                     total += 1
+                    written_here += 1
             except Exception as exc:  # noqa: BLE001 — record & move to next repo
                 log.exception("ingest failed for %s", full_name)
                 _health(source_id, ok=False, error=f"ingest failed: {exc}")
@@ -316,6 +337,11 @@ def main() -> None:
         "--max-items", type=int, default=None,
         help="cap total raw_items written this run (default: uncapped)",
     )
+    parser.add_argument(
+        "--max-per-target", type=int, default=None,
+        help="cap raw_items written per repo (default: uncapped); prefer this over "
+             "--max-items, which is a global counter that starves later targets",
+    )
     args = parser.parse_args()
 
     targets = TARGETS
@@ -330,7 +356,12 @@ def main() -> None:
             # is self-consistent; only ad-hoc CLI runs can spawn a divergent source.
             targets = [(parts[0], parts[1], "README.md", f"github:{parts[1]}")]
 
-    asyncio.run(run_github(targets=targets, dry_run=args.dry_run, max_items=args.max_items))
+    asyncio.run(run_github(
+        targets=targets,
+        dry_run=args.dry_run,
+        max_items=args.max_items,
+        max_per_target=args.max_per_target,
+    ))
 
 
 if __name__ == "__main__":
