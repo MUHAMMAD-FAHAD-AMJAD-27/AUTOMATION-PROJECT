@@ -562,10 +562,23 @@ async def run_deep_web(
     lookback: str = DEFAULT_LOOKBACK,
     dry_run: bool = False,
     max_items: int | None = None,
+    max_items_per_tag: int | None = None,
 ) -> int:
-    """``max_items`` caps total raw_items written across all query templates in one
-    run (None = uncapped, for manual CLI). The scheduler passes a cap so ingestion
-    can't outrun the pipeline's per-slot drain rate."""
+    """Cap ingestion volume so it can't outrun the pipeline's per-slot drain.
+
+    Two independent caps, both optional (None = that cap is off):
+
+    ``max_items`` — a global ceiling on raw_items written across the whole run.
+    A single hard stop; useful for a manual ``--max-items`` CLI run.
+
+    ``max_items_per_tag`` — a per-category-tag budget (the scheduler's real cap).
+    A single global counter consumed in template order let the first tag on a
+    lane eat the entire budget and starve every later tag to ZERO searches
+    (measured 2026-08-26: the llm_api_drop lane ran 5/76 templates and all 64
+    aggregator-tag queries never executed). Budgeting per tag guarantees every
+    tag on a lane is reached; low-yield tags simply run more of their queries to
+    fill the budget. Same fix shape as github_adapter's GITHUB_MAX_PER_TARGET.
+    When both are set, whichever trips first stops that scope (tag or run)."""
     engine = engine or os.environ.get("DEEP_WEB_ENGINE", "ddg")
     serper_key = os.environ.get("SERPER_API_KEY", "")
     if engine == "serper" and not serper_key:
@@ -607,6 +620,7 @@ async def run_deep_web(
 
     seen_hashes: set[str] = set()
     total = 0
+    per_tag_written: dict[str, int] = {}
 
     log.info("Deep web adapter: engine=%s lookback=%s templates=%d", engine, lookback, len(templates))
 
@@ -618,6 +632,14 @@ async def run_deep_web(
             if max_items is not None and total >= max_items:
                 log.info("deep_web hit max_items=%d — stopping", max_items)
                 break
+            # Per-tag budget: skip (don't even search) any query whose tag has
+            # already filled its budget, and fall through to the next tag. This
+            # is what keeps the head tag on a lane from starving the tail — see
+            # the run_deep_web docstring and scheduler._run_deep_web (which sets
+            # this to ADAPTER_LIMIT_PER_RUN // n_tags).
+            if (max_items_per_tag is not None
+                    and per_tag_written.get(category_tag, 0) >= max_items_per_tag):
+                continue
             log.info("[%s] %s", category_tag, query[:90])
             source_name = f"web:deep_search:{category_tag}"
             # Resolve source_id up front so a failed search is still recorded on the source.
@@ -641,6 +663,9 @@ async def run_deep_web(
             for item in raw_results:
                 if max_items is not None and total >= max_items:
                     break
+                if (max_items_per_tag is not None
+                        and per_tag_written.get(category_tag, 0) >= max_items_per_tag):
+                    break
                 url = item.get("href") or item.get("url") or ""
                 if not url or not url.startswith("http"):
                     continue
@@ -661,11 +686,13 @@ async def run_deep_web(
                 if dry_run:
                     print(json.dumps(payload, ensure_ascii=False, indent=2))
                     total += 1
+                    per_tag_written[category_tag] = per_tag_written.get(category_tag, 0) + 1
                     continue
 
                 with connect() as conn:
                     upsert_raw_item(conn, source_id, url_hash, payload)
                 total += 1
+                per_tag_written[category_tag] = per_tag_written.get(category_tag, 0) + 1
 
             _health(source_id, ok=True)
             await asyncio.sleep(INTER_QUERY_DELAY)
@@ -697,6 +724,11 @@ def main() -> None:
         "--max-items", type=int, default=None,
         help="cap total raw_items written this run (default: uncapped)",
     )
+    parser.add_argument(
+        "--max-items-per-tag", type=int, default=None,
+        help="cap raw_items written per category tag (default: uncapped); "
+             "the scheduler uses this so no tag on a lane starves the others",
+    )
     args = parser.parse_args()
 
     asyncio.run(run_deep_web(
@@ -705,6 +737,7 @@ def main() -> None:
         lookback=args.lookback,
         dry_run=args.dry_run,
         max_items=args.max_items,
+        max_items_per_tag=args.max_items_per_tag,
     ))
 
 

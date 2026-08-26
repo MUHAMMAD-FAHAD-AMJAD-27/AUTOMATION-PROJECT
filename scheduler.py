@@ -88,6 +88,22 @@ ADAPTER_LIMIT_PER_RUN = 50   # items fetched per adapter pre-run
 # 253 items/run, vs ~1726 for a global cap big enough to reach the tail.
 GITHUB_MAX_PER_TARGET = 25
 
+# deep_web_adapter had the SAME single-global-counter starvation github had.
+# templates_for_run_category() preserves QUERY_TEMPLATES order, and the
+# llm_api_drop lane carries 76 templates across 6 tags; a global cap of 50
+# consumed in order let the FIRST tag's ~5 high-yield English queries eat the
+# whole budget, so all 64 aggregator-tag queries (the 2026-08-26 OSINT sweep)
+# executed ZERO searches (measured 2026-08-26 via stubbed run_deep_web).
+#
+# Fix: spread the SAME run budget evenly across the distinct tags on the lane
+# (max_items_per_tag = ADAPTER_LIMIT_PER_RUN // n_tags — computed in
+# _run_deep_web) instead of one global counter. Total writes/run stay
+# ≈ ADAPTER_LIMIT_PER_RUN on every lane, so there is no volume blow-up on
+# many-tag lanes and no under-feeding of single-tag lanes, while every tag is
+# guaranteed to be reached. A FIXED per-tag cap was rejected: with lanes
+# ranging from 1 tag (cloud) to 15 (all_deals) it would either starve the
+# single-tag lanes or triple the volume on all_deals.
+
 
 # --------------------------------------------------------------------------- #
 # Slot math
@@ -146,10 +162,15 @@ def _run_deep_web(category: str) -> None:
         from adapters.deep_web_adapter import run_deep_web, templates_for_run_category
 
         templates = templates_for_run_category(category)
+        # Spread the run budget evenly across the distinct tags on this lane so
+        # no head tag starves the tail (see the deep-web note by
+        # GITHUB_MAX_PER_TARGET). n_tags ranges 1 (cloud) → 15 (all_deals).
+        n_tags = len({tag for tag, _ in templates}) or 1
+        per_tag = max(1, ADAPTER_LIMIT_PER_RUN // n_tags)
         asyncio.run(run_deep_web(
             templates=templates,
             lookback="d",
-            max_items=ADAPTER_LIMIT_PER_RUN,
+            max_items_per_tag=per_tag,
         ))
     except Exception as exc:
         log.warning("deep_web adapter failed: %s", exc)
