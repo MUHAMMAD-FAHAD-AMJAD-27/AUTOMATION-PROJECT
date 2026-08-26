@@ -393,7 +393,9 @@ async def run_pipeline(
 
     if dispatch and stats["offers_written"] > 0:
         try:
-            sent = await dispatch_new_offers(dry_run=dry_run, limit=10)
+            # limit (not a hardcoded 10) so --limit / PIPELINE_LIMIT_PER_RUN
+            # actually governs the dispatch tail and the backlog can drain.
+            sent = await dispatch_new_offers(dry_run=dry_run, limit=limit)
             stats["dispatched"] = sent
         except Exception as exc:  # noqa: BLE001
             log.exception("dispatch stage failed: %s", exc)
