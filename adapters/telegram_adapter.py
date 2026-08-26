@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
@@ -57,6 +58,54 @@ def _health(source_id: int | None, ok: bool, error: str | None = None) -> None:
         return
     with connect() as conn:
         record_source_health(conn, source_id, ok=ok, error=error)
+
+
+@dataclass(frozen=True)
+class TelegramCredentials:
+    """Validated TG_* credentials needed to open an MTProto session."""
+
+    api_id: int
+    api_hash: str
+    phone: str
+    session_dir: str
+
+
+# Must be present AND non-blank. Note crawler.db calls load_dotenv(override=True),
+# so a blank value in .env overrides a real exported shell value — hence the
+# emptiness check, not just a presence check.
+_REQUIRED_ENV = ("TG_API_ID", "TG_API_HASH", "TG_PHONE")
+
+
+def _load_credentials() -> TelegramCredentials | None:
+    """Read and validate the TG_* credentials.
+
+    Returns None instead of raising when any required value is missing, blank,
+    or (for TG_API_ID) not an integer, so a Telegram misconfiguration degrades
+    to "this one adapter is disabled" rather than taking down the caller.
+    """
+    blank = [key for key in _REQUIRED_ENV if not os.environ.get(key, "").strip()]
+    if blank:
+        log.warning(
+            "Telegram adapter disabled: %s missing or blank in the environment",
+            ", ".join(blank),
+        )
+        return None
+
+    raw_api_id = os.environ["TG_API_ID"].strip()
+    try:
+        api_id = int(raw_api_id)
+    except ValueError:
+        log.warning("Telegram adapter disabled: TG_API_ID=%r is not an integer", raw_api_id)
+        return None
+
+    session_dir = os.environ.get("TG_SESSION_DIR", "./sessions")
+    os.makedirs(session_dir, exist_ok=True)
+    return TelegramCredentials(
+        api_id=api_id,
+        api_hash=os.environ["TG_API_HASH"].strip(),
+        phone=os.environ["TG_PHONE"].strip(),
+        session_dir=session_dir,
+    )
 
 BACKFILL_LIMIT = 50          # max messages pulled per channel per run (delta safety)
 SEARCH_CADENCE_SECONDS = 3600  # how often auto-discovery scans run
@@ -269,14 +318,13 @@ async def run_telegram_monitor() -> None:
     For a 3x/day batch model instead, call `sync_once()` from the pipeline
     one-off job — no always-on dyno needed.
     """
-    api_id = int(os.environ["TG_API_ID"])
-    api_hash = os.environ["TG_API_HASH"]
-    phone = os.environ["TG_PHONE"]
-    session_dir = os.environ.get("TG_SESSION_DIR", "./sessions")
-    os.makedirs(session_dir, exist_ok=True)
+    creds = _load_credentials()
+    if creds is None:
+        log.warning("run_telegram_monitor: skipping Telegram monitor — no usable credentials")
+        return
 
-    client = TelegramClient(f"{session_dir}/ingest", api_id, api_hash)
-    await client.start(phone=phone, password=lambda: os.environ.get("TG_PASSWORD", ""))
+    client = TelegramClient(f"{creds.session_dir}/ingest", creds.api_id, creds.api_hash)
+    await client.start(phone=creds.phone, password=lambda: os.environ.get("TG_PASSWORD", ""))
     me = await client.get_me()
     log.info("Connected as %s (id=%s)", me.username, me.id)
 
@@ -317,14 +365,13 @@ async def sync_once() -> None:
     always-on monitor but exits after a single pass over all tracked channels.
     Call this from the pipeline one-off job instead of run_telegram_monitor().
     """
-    api_id = int(os.environ["TG_API_ID"])
-    api_hash = os.environ["TG_API_HASH"]
-    phone = os.environ["TG_PHONE"]
-    session_dir = os.environ.get("TG_SESSION_DIR", "./sessions")
-    os.makedirs(session_dir, exist_ok=True)
+    creds = _load_credentials()
+    if creds is None:
+        log.warning("sync_once: skipping Telegram sync — no usable credentials")
+        return
 
-    client = TelegramClient(f"{session_dir}/ingest", api_id, api_hash)
-    await client.start(phone=phone, password=lambda: os.environ.get("TG_PASSWORD", ""))
+    client = TelegramClient(f"{creds.session_dir}/ingest", creds.api_id, creds.api_hash)
+    await client.start(phone=creds.phone, password=lambda: os.environ.get("TG_PASSWORD", ""))
     me = await client.get_me()
     log.info("sync_once connected as %s", me.username)
 

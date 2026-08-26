@@ -58,10 +58,23 @@ async def main() -> None:
     from adapters.telegram_adapter import run_telegram_monitor
 
     log.info("Starting worker: telegram monitor + batch ingest loop")
-    await asyncio.gather(
+    # return_exceptions=True is load-bearing: without it, one task raising kills
+    # every sibling task and the whole dyno. Each result is inspected below so a
+    # failure is logged loudly rather than silently swallowed.
+    task_names = ("telegram monitor", "batch ingest loop")
+    results = await asyncio.gather(
         run_telegram_monitor(),
         _batch_ingest_loop(),
+        return_exceptions=True,
     )
+
+    for name, result in zip(task_names, results):
+        if isinstance(result, BaseException):
+            log.error("worker task %r died: %s: %s", name, type(result).__name__, result,
+                      exc_info=result)
+        else:
+            log.warning("worker task %r exited (returned %r) — it was expected to run forever",
+                        name, result)
 
 
 if __name__ == "__main__":
