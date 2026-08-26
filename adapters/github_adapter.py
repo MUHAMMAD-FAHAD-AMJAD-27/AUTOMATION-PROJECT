@@ -48,7 +48,9 @@ GITHUB_API = "https://api.github.com"
 # Each entry: (owner, repo, file_path_in_repo, source_name_tag)
 TARGETS: list[tuple[str, str, str, str]] = [
     ("ripienaar",        "free-for-dev",              "README.md",   "github:free-for-dev"),
-    ("jnv",              "list-of-free-stuff",         "README.md",   "github:list-of-free-stuff"),
+    # jnv/list-of-free-stuff removed 2026-08-26: repo 404s — GitHub API returns
+    # "Not Found" for BOTH the repo and contents/README.md (confirmed twice), and
+    # no same-name replacement exists on GitHub. Not a wrong-path/branch case.
     ("AchoArnold",       "discount-for-student-dev",   "README.md",   "github:student-dev-discounts"),
     ("piotrkulpinski",   "openalternative",             "README.md",   "github:openalternative"),
     ("awesome-selfhosted", "awesome-selfhosted",        "README.md",   "github:awesome-selfhosted"),
@@ -370,5 +372,4 @@ if __name__ == "__main__":
 # ─── Source registration SQL ──────────────────────────────────────────────────
 # INSERT INTO sources (name, kind, config) VALUES
 #   ('github:free-for-dev',         'web', '{"repo":"ripienaar/free-for-dev","adapter":"github_adapter"}'),
-#   ('github:list-of-free-stuff',   'web', '{"repo":"jnv/list-of-free-stuff","adapter":"github_adapter"}'),
 #   ('github:student-dev-discounts','web', '{"repo":"AchoArnold/discount-for-student-dev","adapter":"github_adapter"}');
