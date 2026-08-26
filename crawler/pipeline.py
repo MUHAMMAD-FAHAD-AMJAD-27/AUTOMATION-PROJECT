@@ -35,6 +35,7 @@ from crawler.verifier import (
     Deduplicator,
     LLMExtractor,
     LivenessProbe,
+    NO_VERDICT,
     VerificationVerdict,
     clean_or_fallback,
     heuristic_prefilter,
@@ -239,7 +240,7 @@ async def run_pipeline(
 ) -> dict:
     stats: dict[str, Any] = {
         "dry_run": dry_run,
-        "fetched": 0, "no_url": 0, "llm_rejected": 0, "dup": 0,
+        "fetched": 0, "no_url": 0, "llm_rejected": 0, "llm_unavailable": 0, "dup": 0,
         "liveness_reject": 0, "offers_written": 0, "errors": 0,
     }
 
@@ -342,13 +343,24 @@ async def run_pipeline(
 
                 for (row, normalized, primary, live), offer in zip(chunk, offers):
                     try:
+                        if offer is NO_VERDICT:
+                            # No LLM verdict could be obtained (no providers, or every
+                            # provider failed). The item was never actually evaluated, so
+                            # retry (permanent=False) — MAX_ATTEMPTS still dead-letters it
+                            # if the outage persists. Distinct from a real rejection below.
+                            stats["llm_unavailable"] += 1
+                            if not dry_run:
+                                mark_raw_item_attempt(conn, row["id"], "llm_unavailable", permanent=False)
+                            continue
+
                         if offer is None:
                             stats["llm_rejected"] += 1
-                            # Retry (permanent=False): a transient full-provider outage
-                            # shouldn't permanently reject a possibly-good item; MAX_ATTEMPTS
-                            # dead-letters genuine non-offers after ~2.5h of slots.
+                            # The LLM evaluated this item and judged it NOT an offer — a
+                            # verdict that won't change on retry. Dead-letter immediately
+                            # (permanent=True) instead of burning MAX_ATTEMPTS batch calls
+                            # re-asking the same question every future run.
                             if not dry_run:
-                                mark_raw_item_attempt(conn, row["id"], "llm_rejected", permanent=False)
+                                mark_raw_item_attempt(conn, row["id"], "llm_rejected", permanent=True)
                             continue
 
                         canonical_url = primary.canonical or clean_or_fallback(primary.final)

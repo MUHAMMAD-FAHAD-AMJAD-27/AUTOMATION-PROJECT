@@ -382,6 +382,26 @@ def _load_providers() -> list[_Provider]:
     return providers
 
 
+class _NoVerdict:
+    """Sentinel distinct from ``None`` in batch extraction results.
+
+    ``None`` means the LLM evaluated an item and judged it NOT an offer — a
+    terminal verdict that will not change on retry, so the item can be
+    dead-lettered. ``NO_VERDICT`` means no LLM verdict could be obtained at all
+    (no providers configured, or every provider failed), so the item must be
+    retried rather than permanently rejected. Collapsing the two into ``None``
+    would silently dead-letter never-evaluated items during any provider outage.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid only
+        return "NO_VERDICT"
+
+
+NO_VERDICT = _NoVerdict()
+
+
 class LLMExtractor:
     """
     Structured extraction via any OpenAI-compatible /chat/completions endpoint.
@@ -409,7 +429,7 @@ class LLMExtractor:
     async def extract_batch(
         self,
         items: list[tuple[NormalizedItem, CanonicalURL | None]],
-    ) -> list[Offer | None]:
+    ) -> list[Offer | None | _NoVerdict]:
         """
         Extract offers for up to BATCH_SIZE items in a single LLM call.
 
@@ -423,7 +443,7 @@ class LLMExtractor:
             return []
         if not self.providers:
             log.error("No LLM providers configured; skipping batch extraction")
-            return [None] * len(items)
+            return [NO_VERDICT] * len(items)
 
         user_content = self._build_batch_user_content(items)
         for provider in self.providers:
@@ -433,9 +453,13 @@ class LLMExtractor:
             log.info("Provider %s failed batch, trying next fallback…", provider.base_url)
 
         log.warning("All providers failed batch extraction — falling back to per-item calls")
-        out: list[Offer | None] = []
+        out: list[Offer | None | _NoVerdict] = []
         for item, primary_url in items:
-            out.append(await self.extract(item, primary_url=primary_url))
+            res = await self.extract(item, primary_url=primary_url)
+            # In this degraded path a None is ambiguous (genuine non-offer vs. the
+            # per-item call also failing), so treat it as "no verdict" and let the
+            # item be retried rather than risk dead-lettering an unevaluated item.
+            out.append(res if res is not None else NO_VERDICT)
         return out
 
     async def _try_provider(self, provider: _Provider, user_content: str) -> Offer | None:
