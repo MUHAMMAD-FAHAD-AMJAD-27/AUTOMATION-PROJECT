@@ -423,16 +423,27 @@ def mark_dispatch(
 async def send_embed(client: httpx.AsyncClient, webhook_url: str, embed: dict[str, Any]) -> dict[str, Any]:
     """Send one embed message with 429/5xx retry + exponential backoff."""
     payload = {"embeds": [embed]}
+    # wait=true makes Discord respond 200 + the created message object (which
+    # carries the message id) instead of a bodiless 204, so we can persist the
+    # id for later edit/delete. Passed as a query param, not baked into the URL,
+    # to leave the bearer token in the URL path untouched.
+    params = {"wait": "true"}
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            resp = await client.post(webhook_url, json=payload)
+            resp = await client.post(webhook_url, params=params, json=payload)
         except httpx.HTTPError as exc:
             log.warning("Network error (attempt %d/%d): %s", attempt, MAX_ATTEMPTS, exc)
             await asyncio.sleep(min(2**attempt, 30))
             continue
 
-        if resp.status_code == 204:  # Discord success
-            return {"ok": True, "message": "sent"}
+        if resp.status_code in (200, 204):  # Discord success (200 + body when wait=true)
+            message_id = None
+            if resp.status_code == 200:
+                try:
+                    message_id = resp.json().get("id")
+                except ValueError:  # non-JSON body; not expected with wait=true
+                    message_id = None
+            return {"ok": True, "message": "sent", "message_id": message_id}
 
         if resp.status_code == 429:  # rate limited -> honor Retry-After
             retry_after = float(resp.headers.get("Retry-After", 2**attempt))
@@ -468,11 +479,13 @@ async def run_batch(database_url: str, webhook_url: str | None, limit: int, cate
     log.info("Dispatching %d offer(s)%s", len(offers), " [DRY RUN]" if dry_run else "")
     default_url = webhook_url or ""
 
+    sent = 0
     async with httpx.AsyncClient(timeout=20.0) as client:
         for offer in offers:
             embed = build_embed(offer)
             if dry_run:
                 print(json.dumps(embed, ensure_ascii=False, indent=2))
+                sent += 1  # previewed; dry-run has no send-failure mode
                 continue
             if not default_url:
                 log.error("DISCORD_WEBHOOK_URL not set (and not --dry-run); aborting send.")
@@ -490,9 +503,11 @@ async def run_batch(database_url: str, webhook_url: str | None, limit: int, cate
                         "title": offer["title"],
                         "url": offer.get("canonical_url") or offer["url"],
                         "webhook_env": CATEGORY_WEBHOOK_ENV.get(offer.get("category") or "", "default"),
+                        "message_id": result.get("message_id"),
                     },
                 )
             if result["ok"]:
+                sent += 1
                 log.info("Sent [%s → %s]: %s",
                          offer.get("category", "?"),
                          CATEGORY_WEBHOOK_ENV.get(offer.get("category") or "", "default"),
@@ -502,7 +517,7 @@ async def run_batch(database_url: str, webhook_url: str | None, limit: int, cate
 
             await asyncio.sleep(WEBHOOK_PACE_SECONDS)
 
-    return len(offers)
+    return sent
 
 
 # --------------------------------------------------------------------------- #
