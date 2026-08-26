@@ -147,11 +147,48 @@ QUERY_TEMPLATES: list[tuple[str, str]] = [
     # llm_api_drop tags rather than duplicating them.
     ("llm_aggregator",    "best OpenRouter alternatives free tier comparison"),
     # Brand-probe. OmniRoute is a real, well-documented aggregator, so it is
-    # wired as a named target. Deliberately NOT wired: gorouter.app (unverified
-    # beyond "probably a rebranded QuantumNous/new-api instance"), true-sota.com
-    # (unverifiable, title-only) and "SeekAI" (does not exist as an LLM
-    # aggregator — a query naming it would only manufacture false positives).
+    # wired as a named target. Deliberately NOT wired as *default* templates:
+    # true-sota.com (unverifiable, title-only) and "SeekAI" (does not exist as
+    # an LLM aggregator — a query naming it would only manufacture false
+    # positives). gorouter.app: 5 of its 6 research probes returned nothing; the
+    # single one that returned anything is wired under llm_aggregator_serper
+    # (it needs quoted-phrase syntax), not here.
     ("llm_aggregator",    "OmniRoute unified LLM API free tier models router"),
+
+    # -- §1a English/global working set (research outcomes ✓/~, DDG-safe) ----- #
+    # Verbatim as run. The generic-descriptors are the steady-state backbone;
+    # the brand-probes below name services confirmed to exist (NanoGPT, Eden AI,
+    # concentrate.ai, evolink.ai) — unconfirmed brands are not wired, see above.
+    ("llm_aggregator",    "free LLM API aggregator unified one API key multiple models 2026"),
+    ("llm_aggregator",    "OpenRouter alternatives free tier LLM router 2026"),
+    ("llm_aggregator",    "OpenAI-compatible gateway multi-provider free models proxy"),
+    ("llm_aggregator",    "Show HN free LLM API gateway aggregator launch"),
+    ("llm_aggregator",    "Product Hunt LLM router unified API free credits new launch 2026"),
+    ("llm_aggregator",    "NanoGPT pay-as-you-go LLM API 400 models no subscription review"),
+    ("llm_aggregator",    "Eden AI unified API 500 models free tier aggregator"),
+    ("llm_aggregator",    "concentrate.ai LLM gateway free credits no service fee review"),
+    ("llm_aggregator",    "evolink.ai LLM gateway free credits models pricing"),
+
+    # -- §1d OSS-gateway / comparison probes (✓, DDG-safe) ------------------- #
+    # Self-hosted gateways are aggregators too: one deploy fronts many providers,
+    # and their READMEs enumerate free tiers, so these are discovery multipliers.
+    ("llm_aggregator",    "OmniRoute omniroute.im self-hosted AI gateway 231 providers github"),
+    ("llm_aggregator",    "one-api songquanpeng vs new-api QuantumNous LLM gateway stars self-hosted"),
+    ("llm_aggregator",    "Portkey gateway github open source AI gateway litellm alternative 250 providers"),
+
+    # -- §3 comparison-multipliers (untested variants) ----------------------- #
+    # Listicle/versus queries: one hit enumerates 10+ services, so they are the
+    # cheapest discovery-per-slot shape in the whole set.
+    ("llm_aggregator",    "best OpenRouter alternatives 2026 free tier self hosted comparison"),
+    ("llm_aggregator",    "LiteLLM vs Portkey vs new-api self hosted LLM gateway free"),
+
+    # -- §4 evergreen descriptors (no year anchor) --------------------------- #
+    # Deliberate near-variants of the §1a descriptors above: same intent without
+    # the "2026" recency anchor, so they keep matching after the year rolls over.
+    ("llm_aggregator",    "free LLM API aggregator unified one key multiple models"),
+    ("llm_aggregator",    "OpenRouter alternative free tier LLM router self hosted"),
+    ("llm_aggregator",    "unified AI API free credits signup no card gateway"),
+    ("llm_aggregator",    "BYOK LLM gateway free no markup route many models"),
 
     # ── Chinese-market aggregators / 中转 / genuine free domestic tiers ──
     ("llm_aggregator_cn", "大模型 API 聚合 一个 key 多个模型 免费额度"),
@@ -159,6 +196,24 @@ QUERY_TEMPLATES: list[tuple[str, str]] = [
     ("llm_aggregator_cn", "免费大模型 API 接口 GLM 智谱 Kimi Moonshot 免费额度 领取"),
     ("llm_aggregator_cn", "国产大模型 免费 API 额度 对比 智谱 通义千问 DeepSeek 硅基流动"),
     ("llm_aggregator_cn", "one-api new-api 开源 大模型网关 令牌分发 中转"),
+
+    # -- §1b Chinese working set (research outcomes ✓/~, all DDG-safe) -------- #
+    # The three fraud-signal rows from §1b are NOT here — they are routed to
+    # aggregator_fraud below, because a 跑路/骗局 hit is a reason to suppress a
+    # service, not an offer to dispatch.
+    ("llm_aggregator_cn", "硅基流动 SiliconFlow 免费额度 API DeepSeek Qwen 大模型"),
+    ("llm_aggregator_cn", "硅基流动 SiliconFlow 注册 送 14元 免费 额度 平台 背景 公司"),
+    ("llm_aggregator_cn", "DMXAPI laozhang.ai API中转 价格 支持模型 GPT Claude Gemini"),
+    ("llm_aggregator_cn", "API2D GPTGOD openai-hk closeai API中转 充值 GPT 国内"),
+    ("llm_aggregator_cn", "chatnio aiproxy 大模型 计费 分销 开源 中转平台"),
+    ("llm_aggregator_cn", "API中转站 推荐 2026 gpt claude 稳定 便宜 分组 一手 渠道 三方"),
+    ("llm_aggregator_cn", "GPT_API_free chatanywhere 免费 openai key github 免费转发"),
+    # The next two are the queries as actually RUN. They differ from the two
+    # shorter variants above/earlier in this block only in extra terms (a second
+    # 免费; 腾讯混元/火山方舟/百炼 instead of 硅基流动), so both forms are kept
+    # deliberately — the shorter ones are broader, these reach vendor-specific pages.
+    ("llm_aggregator_cn", "免费大模型 API 接口 GLM 智谱 免费 Kimi Moonshot 免费额度 领取"),
+    ("llm_aggregator_cn", "国产大模型 免费 API 额度 对比 智谱 通义千问 DeepSeek 腾讯混元 火山方舟 百炼"),
 
     # ── Regional (India / SEA / JP / KR) ──
     # ja and ko were total locale gaps before this block; an English-language
@@ -169,17 +224,75 @@ QUERY_TEMPLATES: list[tuple[str, str]] = [
     ("llm_aggregator_intl", "LLM API まとめ 無料 複数モデル 統合 ゲートウェイ"),
     ("llm_aggregator_intl", "무료 LLM API 통합 여러 모델 하나의 키 게이트웨이"),
 
+    # -- §1c India/SEA working set (research outcomes ✓/~, all DDG-safe) ------ #
+    # NOT wired: "Japan Korea LLM API router aggregator multiple models one
+    # interface startup" — the one query in this block with a ✗ outcome. English
+    # does not reach the JP/KR market; the native-language variants below are the
+    # fix for that gap, not a broader English query.
+    ("llm_aggregator_intl", "India LLM API aggregator unified model router startup"),
+    ("llm_aggregator_intl", "unified AI API India free tier one key many models"),
+    ("llm_aggregator_intl", "free LLM API India developers no credit card aggregator"),
+    ("llm_aggregator_intl", "Indian AI startup API gateway pay UPI rupees GPT Claude Gemini one key"),
+    ("llm_aggregator_intl", "Sarvam AI Krutrim API platform models access developers"),
+    ("llm_aggregator_intl", "airouter.in India LLM router founder review free credits"),
+    ("llm_aggregator_intl", "Southeast Asia LLM API router aggregator Singapore inference platform"),
+    ("llm_aggregator_intl", "Indonesia Vietnam Thailand LLM API platform aggregator free tier developers"),
+    ("llm_aggregator_intl", "SEA-LION API inference free access AI Singapore playground"),
+    ("llm_aggregator_intl", "Vietnam AI API gateway multi-model router startup FPT VNG GreenNode inference"),
+    ("llm_aggregator_intl", "Indonesia AI startup unified LLM API access multiple models GoTo Datasaur"),
+
+    # -- §3 locale fills (untested variants) --------------------------------- #
+    # ja / ko: the two total locale gaps the research exposed. Native-language
+    # only by design — the English JP/KR probe is the ✗ noted above.
+    ("llm_aggregator_intl", "無料 生成AI API キー 開発者 登録不要 OpenAI 互換"),
+    ("llm_aggregator_intl", "OpenAI 互換 API 中継 無料枠 プロキシ 複数モデル"),
+    ("llm_aggregator_intl", "OpenAI 호환 게이트웨이 무료 크레딧 라우터 개발자"),
+    ("llm_aggregator_intl", "생성형 AI API 무료 요금제 여러 모델 프록시"),
+    # India/SEA, payment-localization + indie-launch angles.
+    ("llm_aggregator_intl", "India AI API rupee UPI billing OpenAI compatible cheap developer"),
+    ("llm_aggregator_intl", "Indonesia LLM API rupiah pay as you go gateway multiple models"),
+    ("llm_aggregator_intl", "Vietnam Thailand Philippines free LLM API tier developer aggregator"),
+    ("llm_aggregator_intl", "indie hacker India launched free LLM API gateway multiple models"),
+    # LOW CONFIDENCE (flagged by the research itself): Hindi-language technical
+    # search volume is thin, so this may return little or nothing. Kept as the
+    # only hi-locale probe in the set; drop it if it proves to be a dead slot.
+    ("llm_aggregator_intl", "मुफ्त AI API की डेवलपर भारत एक की कई मॉडल"),
+
     # ── Curated free-API lists (NOTE: overlaps github_adapter TARGETS by
     # design — the adapter parses the lists it already knows about, these
     # discover lists it does not. Dedup happens downstream on canonical_url.) ──
     ("free_api_lists",    "awesome free llm api github list maintained providers rate limits"),
     ("free_api_lists",    "directory of free AI APIs unlimited free LLM models list"),
+    # §1a/§1d list-probes as actually run. Longer forms of the two above; the
+    # trailing "github"/"2026 maintained" terms bias results toward the repos
+    # themselves rather than blog roundups, which is what github_adapter wants.
+    ("free_api_lists",    "directory of free AI APIs unlimited free LLM models list github"),
+    ("free_api_lists",    "awesome free llm api resources github list 2026 maintained providers rate limits"),
+    ("free_api_lists",    "zukixa/cool-ai-stuff free reverse proxy llm api list github"),
+    # NOTE: cheahjs is on the §5.4 github_adapter DENYLIST (its README 404s, so
+    # the adapter cannot fetch it). That does not apply here — this is a web
+    # SEARCH for the list's content and mirrors, not a repo fetch, and the
+    # research gave it a ~ outcome. Do not "clean this up" by deleting it.
+    ("free_api_lists",    "cheahjs free-llm-api-resources github awesome free llm api list"),
 
     # ── Reliability / fraud signal → intended to feed a SUPPRESSION list, NOT
     # the offer feed. Tagged aggregator_fraud and excluded from every default
     # path; see NEVER_INGEST_TAGS below for why that exclusion is mandatory. ──
     ("aggregator_fraud",  "LLM API relay gateway exit scam refund not working review"),
     ("aggregator_fraud",  "中转站 跑路 骗局 假模型 降智 用户评价"),
+    # §1b rows the research typed as fraud-signal. Routed HERE rather than to
+    # llm_aggregator_cn on purpose: a hit means "this relay took the money and
+    # vanished / silently downgrades the model", which is a suppression input.
+    ("aggregator_fraud",  "v3api gptapi.us openai-sb 中转 跑路 稳定性 用户评价"),
+    ("aggregator_fraud",  "DMXAPI 大模型 中转 一个key 所有模型 公司 背景 是否 靠谱"),
+    ("aggregator_fraud",  "V2EX linux.do 中转站 跑路 骗局 假模型 降智 warning aggregator"),
+    # §3 additions: en + ja fraud-signal variants (V2EX/linux.do are the CN
+    # equivalents of HN/Reddit for this niche; the ja one covers the same shape).
+    ("aggregator_fraud",  "LLM API gateway relay down scam refund not working reddit review"),
+    # NOTE: 中転 here is almost certainly a typo for 中継 (relay) in the source
+    # research; wired verbatim as supplied rather than silently "corrected", so
+    # the template set stays auditable against the document it came from.
+    ("aggregator_fraud",  "AI API 中転 サービス 停止 詐欺 返金"),
 
     # ── Serper-only bucket. site:/OR/quoted syntax is unsupported or silently
     # ignored by DuckDuckGo, so these return junk or nothing under the default
@@ -187,6 +300,23 @@ QUERY_TEMPLATES: list[tuple[str, str]] = [
     ("llm_aggregator_serper", "site:github.com awesome free llm api providers rate limits"),
     ("llm_aggregator_serper", "site:news.ycombinator.com Show HN LLM router gateway free"),
     ("llm_aggregator_serper", "site:reddit.com/r/LocalLLaMA free API aggregator many models"),
+    # §3 site:-scoped variants as proposed — longer tails than the three above.
+    ("llm_aggregator_serper", "site:github.com awesome free llm api providers rate limits maintained"),
+    ("llm_aggregator_serper", "site:news.ycombinator.com Show HN LLM router gateway free tier"),
+    ("llm_aggregator_serper", "site:reddit.com/r/LocalLLaMA free API aggregator many models one key"),
+    ("llm_aggregator_serper", "site:reddit.com/r/SideProject launched LLM gateway free credits"),
+    # §1a/§1c/§1d rows whose engine column is S. These carry quoted phrases or
+    # OR operators rather than site:, but the reason they are gated is identical:
+    # ddgs ignores both, so under the default engine they degrade to noise.
+    ('llm_aggregator_serper', '"free" LLM API access 500 models one key reddit LocalLLaMA'),
+    ('llm_aggregator_serper', 'new LLM aggregator free credits signup no card 2026 "one API" unified gateway'),
+    ('llm_aggregator_serper', "Requesty AI OR Glama AI OR Pollinations free LLM API router"),
+    ('llm_aggregator_serper', 'AI/ML API aggregator 300 models free tier "aimlapi" OR "unify.ai" OR "notdiamond"'),
+    ('llm_aggregator_serper', 'YourStory OR "Tech in Asia" OR e27 AI startup unified API access many LLM models one key India Singapore'),
+    # The ONE gorouter.app probe that returned anything (~) out of six attempted.
+    # Its five ✗ siblings are not wired. It needs the quoted "new api" phrase to
+    # work at all, which is why it lives in the serper bucket and not above.
+    ('llm_aggregator_serper', 'gorouter.app "new api" free llm keys claude gpt gemini'),
 ]
 
 # --------------------------------------------------------------------------- #
