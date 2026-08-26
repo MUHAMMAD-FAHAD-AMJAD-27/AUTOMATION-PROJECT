@@ -40,6 +40,12 @@ from crawler.categories import is_valid_category
 
 log = logging.getLogger("scheduler")
 
+# SECURITY: the scheduler is the always-on production process and drives every
+# dispatch, so httpx's INFO "HTTP Request: <full url>" line would put live Discord
+# webhook tokens into the Heroku log stream on every slot. Set at import time so
+# it holds no matter which entrypoint (main(), --now, or a slot callback) runs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # --------------------------------------------------------------------------- #
 # Scheduling axis — must stay stable; index determines time slot.
 # NOTE: this is NOT the offer taxonomy (that lives in crawler/categories.py).

@@ -62,6 +62,14 @@ load_dotenv(override=True)
 
 log = logging.getLogger("dispatcher")
 
+# SECURITY: httpx logs every request's full URL at INFO. A Discord webhook URL
+# *is* its own credential (id + 68-char token), so leaving this at INFO writes a
+# live secret to stdout on every send — and on Heroku, into the log stream.
+# Set at import time, not inside main(): pipeline.dispatch_new_offers() imports
+# this module and calls run_batch() directly, so a main()-only guard would leave
+# the production scheduler path leaking. Application-level INFO is unaffected.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # Category -> (emoji badge, Discord decimal color), derived from the single
 # source of truth in crawler/categories.py.
 CATEGORY_STYLE: dict[str, tuple[str, int]] = {

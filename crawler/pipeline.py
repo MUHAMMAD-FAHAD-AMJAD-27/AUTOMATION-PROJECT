@@ -51,6 +51,12 @@ logging.basicConfig(
 )
 log = logging.getLogger("pipeline")
 
+# SECURITY: suppress httpx's INFO "HTTP Request: <full url>" line. The pipeline
+# hands off to discord_dispatcher in-process, and a Discord webhook URL is itself
+# a credential — at INFO it would be written to stdout on every dispatch. Also
+# keeps canonicalizer/liveness probe URLs out of the log. App INFO is unaffected.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 # --------------------------------------------------------------------------- #
 # DB helpers
