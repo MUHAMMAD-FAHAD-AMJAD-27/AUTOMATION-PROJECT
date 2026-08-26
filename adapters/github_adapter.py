@@ -60,17 +60,30 @@ TARGETS: list[tuple[str, str, str, str]] = [
     # exhausts its budget on free-for-dev first and will not reach these — that is
     # tracked as a Step-3 scheduler-cap fix, not a github_adapter change.
     #
-    # Two candidates were dropped after a real ingest showed near-zero yield with
-    # the current parser (_MD_LINK_RE only matches inline [text](url) links, and
-    # min_section_filter needs a HIGH_SIGNAL_SECTION or the literal word "free"):
-    #   * open-free-llm-api/awesome-freellm-apis — 0 inline md links (HTML/ref
-    #     format); yielded 0 entries.
-    #   * howardpen9/awesome-ai-api-proxy — 38 non-github links but only 3 lines
-    #     contain "free"; the rest are §5 fraud-risk CN relays. Yielded 2.
-    # Re-add only if _MD_LINK_RE is broadened to HTML/reference links.
-    ("raullenchai",      "free-llm-api-resources",     "README.md",   "github:free-llm-api-resources"),
-    ("ClawLabsAI",       "free-ai-models",             "README.md",   "github:free-ai-models"),
-    ("nejib1",           "Free-LLM",                   "README.md",   "github:free-llm"),
+    # Every entry below was fetched read-only through _fetch_file_content and
+    # parsed with the real _parse_markdown(min_section_filter=True); the trailing
+    # comment is the MEASURED entry count on 2026-08-26, not an estimate.
+    #
+    # Ordering: auto-updated / daily-synced lists first, then actively maintained,
+    # then the remainder. Two of these yield almost nothing with the CURRENT parser
+    # (_MD_LINK_RE matches only inline [text](url) links, and min_section_filter
+    # needs a HIGH_SIGNAL_SECTION or the literal word "free" on the line). They are
+    # wired anyway so a future _MD_LINK_RE broadening picks them up automatically;
+    # the low yield is a parser limitation, not a bad source.
+    ("raullenchai",      "free-llm-api-resources",     "README.md",   "github:free-llm-api-resources"),   # 27
+    ("ClawLabsAI",       "free-ai-models",             "README.md",   "github:free-ai-models"),           # 18  auto-updates /24h
+    ("nejib1",           "Free-LLM",                   "README.md",   "github:free-llm"),                 # 31  synced daily
+    ("howardpen9",       "awesome-ai-api-proxy",       "README.md",   "github:awesome-ai-api-proxy"),     # 2   actively maintained; rest of file is §5 fraud-risk CN relays
+    ("open-free-llm-api", "awesome-freellm-apis",      "README.md",   "github:awesome-freellm-apis"),     # 0   HTML/ref-style links only — inert until _MD_LINK_RE is broadened
+    ("zukixa",           "cool-ai-stuff",              "README.md",   "github:cool-ai-stuff"),            # 8
+    # Both of the next two repos are literally named "awesome-free-llm-apis".
+    # sources.name is UNIQUE, so the bare github:<repo> convention would collapse
+    # them into ONE source row and merge two different repos' items. Suffix by owner.
+    ("amardeeplakshkar", "awesome-free-llm-apis",      "README.md",   "github:awesome-free-llm-apis-amardeeplakshkar"),  # 1
+    ("mnfst",            "awesome-free-llm-apis",      "README.md",   "github:awesome-free-llm-apis-mnfst"),             # 28
+    ("vava-nessa",       "free-coding-models",         "README.md",   "github:free-coding-models"),       # 23
+    ("tatn",             "awesome-free-ai-apis",       "README.md",   "github:awesome-free-ai-apis"),     # 1
+    ("12britz",          "awesome-free-models",        "README.md",   "github:awesome-free-models"),      # 82
 ]
 
 # Section headings in free-for-dev that are highest signal for our pipeline.
