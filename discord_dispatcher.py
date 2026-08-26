@@ -390,10 +390,16 @@ def mark_dispatch(
 ) -> None:
     with conn.cursor() as cur:
         cur.execute(
+            # NB: attempts is NOT incremented here. It is the re-claim counter,
+            # and claim_offers already bumps it once per lease under the same
+            # atomic UPDATE that grants ownership (see the MAX_RECLAIM_ATTEMPTS
+            # ceiling it guards). mark_dispatch only records the *outcome* of an
+            # attempt that has already been counted — incrementing here too made
+            # a single successful send read as attempts=2 and burned reclaim
+            # budget twice as fast.
             """
             UPDATE dispatches
             SET status = %(status)s,
-                attempts = attempts + 1,
                 last_error = %(error)s,
                 message_meta = %(meta)s,
                 sent_at = CASE WHEN %(status)s = 'sent' THEN now() ELSE sent_at END
