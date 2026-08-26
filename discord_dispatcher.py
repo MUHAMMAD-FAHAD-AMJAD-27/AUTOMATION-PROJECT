@@ -106,6 +106,13 @@ EMBED_LIMITS = {"title": 256, "description": 4096, "field_name": 256, "field_val
 WEBHOOK_PACE_SECONDS = 2.5   # ~24 msg/min worst case, safely under Discord's 30/min
 MAX_ATTEMPTS = 4
 
+# Mirror of the dispatches.channel CHECK in schema.sql
+# (CHECK (channel IN ('discord','email','web'))). Kept here so run_batch can
+# reject a bad channel with a clear ValueError instead of letting it reach the
+# INSERT and surface as an opaque Postgres constraint violation. If the schema
+# CHECK ever changes, change this too.
+ALLOWED_CHANNELS = frozenset({"discord", "email", "web"})
+
 # Lease semantics: when a dispatcher worker stamps claimed_at on a pending
 # row, it owns that row for DISPATCH_LEASE_MINUTES. If a process dies between
 # the lease stamp and the actual webhook send, the row would otherwise be
@@ -444,10 +451,15 @@ async def send_embed(client: httpx.AsyncClient, webhook_url: str, embed: dict[st
     return {"ok": False, "message": "max attempts reached"}
 
 
-async def run_batch(database_url: str, webhook_url: str | None, limit: int, category: str | None, dry_run: bool) -> int:
+async def run_batch(database_url: str, webhook_url: str | None, limit: int, category: str | None, dry_run: bool, channel: str = "discord") -> int:
+    if channel not in ALLOWED_CHANNELS:
+        raise ValueError(
+            f"channel {channel!r} not in {sorted(ALLOWED_CHANNELS)} "
+            "(must match the dispatches.channel CHECK constraint)"
+        )
     offers = []
     with psycopg.connect(database_url, row_factory=dict_row) as conn:
-        offers = claim_offers(conn, channel="discord", limit=limit, category=category)
+        offers = claim_offers(conn, channel=channel, limit=limit, category=category)
 
     if not offers:
         log.info("Nothing to dispatch.")
