@@ -23,6 +23,7 @@ Usage (from anywhere):
     python run.py ingest-deep-web --dry-run
     python run.py ingest-deep-web --category ai_apis
     python run.py ingest-deep-web --engine serper
+    python run.py status                     # read-only system health snapshot
 
 With a standard python.org / venv Python you can equally use:
     python -m crawler.pipeline --dry-run
@@ -125,6 +126,12 @@ def run_scheduler(argv: list[str]) -> int:
     return 0
 
 
+def run_status(argv: list[str]) -> int:
+    from crawler.status import main
+
+    return main(argv)
+
+
 COMMANDS = {
     "pipeline":           run_pipeline,
     "dispatcher":         run_dispatcher,
@@ -137,6 +144,7 @@ COMMANDS = {
     "ingest-deep-web":    run_ingest_deep_web,
     "ingest-firecrawl":   run_ingest_firecrawl,
     "scheduler":          run_scheduler,
+    "status":             run_status,
 }
 
 
