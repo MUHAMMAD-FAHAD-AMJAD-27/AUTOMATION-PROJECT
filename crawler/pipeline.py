@@ -31,12 +31,14 @@ import psycopg
 from psycopg.rows import dict_row
 
 from crawler.normalizer import CanonicalURL, URLCanonicalizer, normalize_raw_item
+from crawler.provider_scheduler import SchedulerConfig
 from crawler.verifier import (
     Deduplicator,
     LLMExtractor,
     LivenessProbe,
     NO_VERDICT,
     VerificationVerdict,
+    _distribution_enabled,
     clean_or_fallback,
     heuristic_prefilter,
     verify_item,
@@ -229,6 +231,188 @@ async def dispatch_new_offers(dry_run: bool, limit: int = 10) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Stage B: batched LLM extraction + sequential write
+# --------------------------------------------------------------------------- #
+async def _process_batch_result(
+    conn: psycopg.Connection,
+    deduplicator: Deduplicator,
+    extractor: LLMExtractor,
+    chunk: list[tuple[dict, Any, CanonicalURL, Any]],
+    offers_or_exc: list | BaseException,
+    stats: dict,
+    dry_run: bool,
+) -> None:
+    """Write one chunk's extraction result to the DB — strictly sequential.
+
+    ``offers_or_exc`` is either the per-item offers list returned by
+    ``extract_batch`` (positionally aligned to ``chunk``) or the ``Exception``
+    that batch raised. Both the flag-off and flag-on paths funnel through this
+    single helper, so the dedup/embed/write body and the whole-batch-failure
+    handling are defined exactly once. The caller invokes it with ``await`` one
+    chunk at a time, in chunk order, keeping the write stage sequential and each
+    chunk's ``(chunk, offers)`` pairing intact regardless of how extraction ran.
+    """
+    if isinstance(offers_or_exc, BaseException):
+        exc = offers_or_exc
+        stats["errors"] += len(chunk)
+        # log.error(exc_info=…) renders the same traceback as the previous
+        # inline log.exception(); used here because in the concurrent path the
+        # exception is captured by gather() rather than active in an except block.
+        log.error(
+            "batch extraction failed for chunk starting raw_item_id=%s",
+            chunk[0][0]["id"], exc_info=exc,
+        )
+        # Whole-batch failure is usually a transient provider outage —
+        # retry (permanent=False); MAX_ATTEMPTS dead-letters if it persists.
+        if not dry_run:
+            for row, *_ in chunk:
+                mark_raw_item_attempt(
+                    conn, row["id"], f"batch_error:{type(exc).__name__}", permanent=False
+                )
+        return
+
+    offers = offers_or_exc
+    for (row, normalized, primary, live), offer in zip(chunk, offers):
+        try:
+            if offer is NO_VERDICT:
+                # No LLM verdict could be obtained (no providers, or every
+                # provider failed). The item was never actually evaluated, so
+                # retry (permanent=False) — MAX_ATTEMPTS still dead-letters it
+                # if the outage persists. Distinct from a real rejection below.
+                stats["llm_unavailable"] += 1
+                if not dry_run:
+                    mark_raw_item_attempt(conn, row["id"], "llm_unavailable", permanent=False)
+                continue
+
+            if offer is None:
+                stats["llm_rejected"] += 1
+                # The LLM evaluated this item and judged it NOT an offer — a
+                # verdict that won't change on retry. Dead-letter immediately
+                # (permanent=True) instead of burning MAX_ATTEMPTS batch calls
+                # re-asking the same question every future run.
+                if not dry_run:
+                    mark_raw_item_attempt(conn, row["id"], "llm_rejected", permanent=True)
+                continue
+
+            canonical_url = primary.canonical or clean_or_fallback(primary.final)
+            dup = deduplicator.check(canonical_url)
+            if dup.is_dup:
+                stats["dup"] += 1
+                # A dup stays a dup — dead-letter so we never re-extract it.
+                if not dry_run:
+                    mark_raw_item_attempt(conn, row["id"], "dup:url", permanent=True)
+                continue
+
+            embedding = None
+            embeds = await extractor.embed([f"{offer.title}\n{offer.description or ''}"])
+            if embeds:
+                embedding = embeds[0][:256]
+                dup = deduplicator.check_semantic(embedding)
+                if dup.is_dup:
+                    stats["dup"] += 1
+                    if not dry_run:
+                        mark_raw_item_attempt(conn, row["id"], "dup:semantic", permanent=True)
+                    continue
+
+            if live.ok:
+                offer.confidence = min(1.0, offer.confidence * 1.05)
+            if live.status == "unreachable":
+                offer.confidence = max(0.0, offer.confidence * 0.7)
+
+            verdict = VerificationVerdict(offer, live, dup, primary)
+            verdict.offer.__dict__["_embedding"] = embedding
+
+            if dry_run:
+                log.info("[dry-run] would write: %r -> %s", offer.title, offer.url)
+                stats["offers_written"] += 1
+            else:
+                offer_id = write_offer(conn, verdict, normalized)
+                if offer_id:
+                    stats["offers_written"] += 1
+                    log.info("offer #%s: %s", offer_id, offer.title)
+        except Exception as exc:  # noqa: BLE001 — one bad item never kills the run
+            stats["errors"] += 1
+            log.exception("item failed (post-extract): raw_item_id=%s", row["id"])
+            if not dry_run:
+                mark_raw_item_attempt(
+                    conn, row["id"], f"error:{type(exc).__name__}", permanent=False
+                )
+
+
+async def _extract_chunks_concurrent(
+    extractor: LLMExtractor,
+    chunks: list[list[tuple[dict, Any, CanonicalURL, Any]]],
+) -> list:
+    """Run each chunk's ``extract_batch`` concurrently, bounded by a semaphore.
+
+    Used only on the distribution flag-ON path. The cap is
+    ``LLM_MAX_CONCURRENT_BATCHES`` (SchedulerConfig default 3). ``asyncio.gather``
+    preserves input order, so the returned list is positionally aligned to
+    ``chunks``; ``return_exceptions=True`` turns a single failed batch into that
+    element's value instead of cancelling the others, so the sequential write
+    stage can pair results back with ``zip(chunks, results)`` and dead-letter
+    just the failed chunk. Only extraction is concurrent here — the write stage
+    the caller runs afterwards stays strictly sequential.
+    """
+    cap = max(1, SchedulerConfig.from_env().max_concurrent_batches)
+    sem = asyncio.Semaphore(cap)
+
+    async def _one(chunk):
+        async with sem:
+            return await extractor.extract_batch(
+                [(normalized, primary) for _, normalized, primary, _ in chunk]
+            )
+
+    return await asyncio.gather(
+        *(_one(chunk) for chunk in chunks), return_exceptions=True
+    )
+
+
+async def _run_stage_b(
+    conn: psycopg.Connection,
+    deduplicator: Deduplicator,
+    extractor: LLMExtractor,
+    survivors: list[tuple[dict, Any, CanonicalURL, Any]],
+    stats: dict,
+    dry_run: bool,
+) -> None:
+    """Batched LLM extraction (BATCH_SIZE items/call) + sequential write.
+
+    Distribution OFF (default): byte-for-byte the pre-Phase-20 behavior —
+    extract one chunk, write that chunk, move to the next. Extraction and the
+    write stage stay interleaved and strictly sequential.
+
+    Distribution ON (``LLM_DISTRIBUTION_ENABLED`` truthy): the ProviderScheduler
+    spreads load across providers, so up to ``LLM_MAX_CONCURRENT_BATCHES``
+    extraction calls run concurrently (``asyncio.gather`` + ``Semaphore``). The
+    write/dedup/embed stage still runs strictly sequentially in chunk order via
+    the shared ``_process_batch_result`` helper, and each chunk keeps its
+    ``(chunk, offers)`` pairing, so DB write ordering and dedup semantics are
+    identical to the sequential path.
+    """
+    chunks = [survivors[i: i + BATCH_SIZE]
+              for i in range(0, len(survivors), BATCH_SIZE)]
+
+    if _distribution_enabled():
+        results = await _extract_chunks_concurrent(extractor, chunks)
+        for chunk, offers_or_exc in zip(chunks, results):
+            await _process_batch_result(
+                conn, deduplicator, extractor, chunk, offers_or_exc, stats, dry_run
+            )
+    else:
+        for chunk in chunks:
+            try:
+                offers = await extractor.extract_batch(
+                    [(normalized, primary) for _, normalized, primary, _ in chunk]
+                )
+            except Exception as exc:  # noqa: BLE001 — one bad batch never kills the run
+                offers = exc
+            await _process_batch_result(
+                conn, deduplicator, extractor, chunk, offers, stats, dry_run
+            )
+
+
+# --------------------------------------------------------------------------- #
 # Main orchestrator
 # --------------------------------------------------------------------------- #
 async def run_pipeline(
@@ -322,90 +506,10 @@ async def run_pipeline(
                         )
 
             # --- Stage B: batched LLM extraction (BATCH_SIZE items/call) --- #
-            for i in range(0, len(survivors), BATCH_SIZE):
-                chunk = survivors[i: i + BATCH_SIZE]
-                try:
-                    offers = await extractor.extract_batch(
-                        [(normalized, primary) for _, normalized, primary, _ in chunk]
-                    )
-                except Exception as exc:  # noqa: BLE001 — one bad batch never kills the run
-                    stats["errors"] += len(chunk)
-                    log.exception("batch extraction failed for chunk starting raw_item_id=%s",
-                                  chunk[0][0]["id"])
-                    # Whole-batch failure is usually a transient provider outage —
-                    # retry (permanent=False); MAX_ATTEMPTS dead-letters if it persists.
-                    if not dry_run:
-                        for row, *_ in chunk:
-                            mark_raw_item_attempt(
-                                conn, row["id"], f"batch_error:{type(exc).__name__}", permanent=False
-                            )
-                    continue
-
-                for (row, normalized, primary, live), offer in zip(chunk, offers):
-                    try:
-                        if offer is NO_VERDICT:
-                            # No LLM verdict could be obtained (no providers, or every
-                            # provider failed). The item was never actually evaluated, so
-                            # retry (permanent=False) — MAX_ATTEMPTS still dead-letters it
-                            # if the outage persists. Distinct from a real rejection below.
-                            stats["llm_unavailable"] += 1
-                            if not dry_run:
-                                mark_raw_item_attempt(conn, row["id"], "llm_unavailable", permanent=False)
-                            continue
-
-                        if offer is None:
-                            stats["llm_rejected"] += 1
-                            # The LLM evaluated this item and judged it NOT an offer — a
-                            # verdict that won't change on retry. Dead-letter immediately
-                            # (permanent=True) instead of burning MAX_ATTEMPTS batch calls
-                            # re-asking the same question every future run.
-                            if not dry_run:
-                                mark_raw_item_attempt(conn, row["id"], "llm_rejected", permanent=True)
-                            continue
-
-                        canonical_url = primary.canonical or clean_or_fallback(primary.final)
-                        dup = deduplicator.check(canonical_url)
-                        if dup.is_dup:
-                            stats["dup"] += 1
-                            # A dup stays a dup — dead-letter so we never re-extract it.
-                            if not dry_run:
-                                mark_raw_item_attempt(conn, row["id"], "dup:url", permanent=True)
-                            continue
-
-                        embedding = None
-                        embeds = await extractor.embed([f"{offer.title}\n{offer.description or ''}"])
-                        if embeds:
-                            embedding = embeds[0][:256]
-                            dup = deduplicator.check_semantic(embedding)
-                            if dup.is_dup:
-                                stats["dup"] += 1
-                                if not dry_run:
-                                    mark_raw_item_attempt(conn, row["id"], "dup:semantic", permanent=True)
-                                continue
-
-                        if live.ok:
-                            offer.confidence = min(1.0, offer.confidence * 1.05)
-                        if live.status == "unreachable":
-                            offer.confidence = max(0.0, offer.confidence * 0.7)
-
-                        verdict = VerificationVerdict(offer, live, dup, primary)
-                        verdict.offer.__dict__["_embedding"] = embedding
-
-                        if dry_run:
-                            log.info("[dry-run] would write: %r -> %s", offer.title, offer.url)
-                            stats["offers_written"] += 1
-                        else:
-                            offer_id = write_offer(conn, verdict, normalized)
-                            if offer_id:
-                                stats["offers_written"] += 1
-                                log.info("offer #%s: %s", offer_id, offer.title)
-                    except Exception as exc:  # noqa: BLE001 — one bad item never kills the run
-                        stats["errors"] += 1
-                        log.exception("item failed (post-extract): raw_item_id=%s", row["id"])
-                        if not dry_run:
-                            mark_raw_item_attempt(
-                                conn, row["id"], f"error:{type(exc).__name__}", permanent=False
-                            )
+            # Sequential extract->write when distribution is OFF (default);
+            # concurrent extraction (bounded by LLM_MAX_CONCURRENT_BATCHES) with
+            # a still-sequential write stage when it is ON. See _run_stage_b.
+            await _run_stage_b(conn, deduplicator, extractor, survivors, stats, dry_run)
 
         mark_run(conn, run_id, "success" if stats["errors"] == 0 else "partial", stats)
 
