@@ -256,6 +256,7 @@ def claim_offers(
     channel: str,
     limit: int,
     category: str | None,
+    dry_run: bool = False,
 ) -> list[dict[str, Any]]:
     """Claim due offers atomically. Returns full offer rows for the batch.
 
@@ -273,6 +274,10 @@ def claim_offers(
     `attempts` is incremented on every claim — a re-claim ceiling of
     MAX_RECLAIM_ATTEMPTS protects against poison rows retried forever. Rows
     at the ceiling are logged as a warning and skipped.
+
+    When ``dry_run`` is True this is a strictly read-only preview: it returns
+    the offers that would be dispatched without inserting, claiming, or
+    committing anything (see the inline note below).
     """
     cat_filter = "AND o.category = %(category)s" if category else ""
     lease_interval = f"{DISPATCH_LEASE_MINUTES} minutes"
@@ -283,6 +288,42 @@ def claim_offers(
         "lease_interval": lease_interval,
         "max_reclaim": MAX_RECLAIM_ATTEMPTS,
     }
+
+    # DRY-RUN: preview ONLY — must not mutate the dispatches table.
+    # Previously run_batch() called claim_offers() unconditionally and only
+    # skipped the *webhook send* under dry_run, so a "preview" still ran the
+    # step-1 INSERT and the step-2 claim UPDATE: it inserted pending rows and
+    # stamped claimed_at / bumped attempts on real rows. That is exactly how
+    # orphaned pending rows (claimed-but-never-sent) were created. Here we run a
+    # single read-only projection of the offers that WOULD be dispatched —
+    # same eligibility filter + created_at ordering + limit as the live claim —
+    # with no INSERT, no UPDATE, and no commit. It is an approximation of the
+    # live claim ordering: brand-new offers have no dispatch row yet, so they
+    # sort last (COALESCE created_at -> +infinity). Fine for a preview; the
+    # real claim path below is unchanged.
+    if dry_run:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT o.*, s.name AS source_name, d.id AS _dispatch_id
+                FROM offers o
+                JOIN raw_items r ON r.id = o.raw_item_id
+                JOIN sources  s ON s.id = r.source_id
+                LEFT JOIN dispatches d
+                       ON d.offer_id = o.id AND d.channel = %(channel)s
+                WHERE o.verification_status IN ('verified','live')
+                  AND o.is_active
+                  AND (d.id IS NULL OR d.status <> 'sent')
+                  {cat_filter}
+                ORDER BY COALESCE(d.created_at, 'infinity'::timestamptz) ASC,
+                         o.first_seen DESC
+                LIMIT %(limit)s
+                """,
+                params,
+            )
+            preview = cur.fetchall()
+        conn.rollback()  # release the read-only txn; guarantee nothing persists
+        return preview
 
     with conn.cursor() as cur:
         # 0) Log any failed rows at the re-claim ceiling so the operator
@@ -470,7 +511,7 @@ async def run_batch(database_url: str, webhook_url: str | None, limit: int, cate
         )
     offers = []
     with psycopg.connect(database_url, row_factory=dict_row) as conn:
-        offers = claim_offers(conn, channel=channel, limit=limit, category=category)
+        offers = claim_offers(conn, channel=channel, limit=limit, category=category, dry_run=dry_run)
 
     if not offers:
         log.info("Nothing to dispatch.")
