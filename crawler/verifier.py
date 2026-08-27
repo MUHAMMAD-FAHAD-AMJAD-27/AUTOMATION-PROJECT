@@ -55,8 +55,21 @@ from crawler.categories import (
     offer_type_prompt_csv,
 )
 from crawler.normalizer import CanonicalURL, NormalizedItem
+from crawler.provider_scheduler import ProviderScheduler, estimate_tokens
 
 load_dotenv(override=True)
+
+
+def _distribution_enabled() -> bool:
+    """Feature flag for capacity-aware provider distribution (Phase 18 Step 2).
+
+    OFF unless ``LLM_DISTRIBUTION_ENABLED`` is explicitly truthy. When off, the
+    scheduler is never even constructed and extract_batch() runs the exact
+    fixed-order fallback loop it always has.
+    """
+    return os.environ.get("LLM_DISTRIBUTION_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 log = logging.getLogger("verifier")
 
@@ -412,6 +425,26 @@ class LLMExtractor:
     def __init__(self, timeout: float = 45.0) -> None:
         self.providers = _load_providers()
         self.timeout = timeout
+        # Capacity-aware distribution (Phase 18 Step 2), OFF by default.
+        # Only when LLM_DISTRIBUTION_ENABLED is truthy do we build a scheduler
+        # keyed by base_url (RPM/TPM + breaker knobs come from SchedulerConfig
+        # / ProviderScheduler.from_env). Otherwise self._scheduler stays None
+        # and every code path below is byte-for-byte the fixed-order chain.
+        # Assumption: provider base_urls are distinct (they are for the current
+        # Groq/OpenRouter/Mistral/Gemini chain). Two providers sharing a
+        # base_url would collide in this map — flagged as a future concern if
+        # multi-key-same-endpoint fan-out is ever added.
+        self._scheduler: ProviderScheduler | None = None
+        self._by_key: dict[str, _Provider] = {}
+        if self.providers and _distribution_enabled():
+            self._by_key = {p.base_url: p for p in self.providers}
+            self._scheduler = ProviderScheduler.from_env(
+                [p.base_url for p in self.providers]
+            )
+            log.info(
+                "LLM distribution ENABLED — scheduler over %d providers",
+                len(self.providers),
+            )
 
     async def extract(self, item: NormalizedItem, primary_url: CanonicalURL | None = None) -> Offer | None:
         if not self.providers:
@@ -445,6 +478,12 @@ class LLMExtractor:
             log.error("No LLM providers configured; skipping batch extraction")
             return [NO_VERDICT] * len(items)
 
+        # Distribution flag-on: capacity-aware provider selection. When the flag
+        # is off self._scheduler is None, this branch is skipped, and the loop
+        # below runs unchanged — no scheduler method is ever called.
+        if self._scheduler is not None:
+            return await self._extract_batch_scheduled(items)
+
         user_content = self._build_batch_user_content(items)
         for provider in self.providers:
             results = await self._try_provider_batch(provider, user_content, len(items))
@@ -461,6 +500,147 @@ class LLMExtractor:
             # item be retried rather than risk dead-lettering an unevaluated item.
             out.append(res if res is not None else NO_VERDICT)
         return out
+
+    async def _extract_batch_scheduled(
+        self,
+        items: list[tuple[NormalizedItem, CanonicalURL | None]],
+    ) -> list[Offer | None | _NoVerdict]:
+        """Flag-on variant of the batch loop (LLM_DISTRIBUTION_ENABLED truthy).
+
+        Differs from the fixed-order loop in exactly one way: instead of always
+        starting at ``self.providers[0]``, it asks the scheduler which provider
+        to try FIRST (capacity-aware, skipping rate-exhausted / circuit-open
+        slots), then falls through the remaining providers in the original
+        fixed order. If ``pick()`` returns None (nothing free), it degrades to
+        the pure fixed-order chain, so it can never do worse than flag-off.
+
+        Outcomes are fed back via ``scheduler.record()`` with the real
+        ``usage.total_tokens`` when the response reports it, else the request
+        estimate. The returned list stays positionally aligned to ``items`` —
+        identical ordering contract to extract_batch(), preserving the
+        ``zip(chunk, offers)`` alignment in pipeline.py.
+        """
+        assert self._scheduler is not None  # guaranteed by caller
+        user_content = self._build_batch_user_content(items)
+        est = estimate_tokens(user_content)
+
+        start_key = self._scheduler.pick(est)
+        if start_key is None:
+            # Nothing free per the buckets/breakers — degrade to the exact
+            # fixed-order chain (never worse than today).
+            ordered = list(self.providers)
+        else:
+            start = self._by_key[start_key]
+            idx = self.providers.index(start)
+            ordered = self.providers[idx:] + self.providers[:idx]
+
+        for provider in ordered:
+            results, tokens, status = await self._try_provider_batch_metered(
+                provider, user_content, len(items)
+            )
+            if results is not None:
+                self._scheduler.record(
+                    provider.base_url,
+                    tokens=tokens if tokens is not None else est,
+                    status=200,
+                    success=True,
+                )
+                return results
+            self._scheduler.record(
+                provider.base_url, tokens=None, status=status, success=False
+            )
+            log.info("Provider %s failed batch, trying next…", provider.base_url)
+
+        log.warning("All providers failed batch extraction — falling back to per-item calls")
+        out: list[Offer | None | _NoVerdict] = []
+        for item, primary_url in items:
+            res = await self.extract(item, primary_url=primary_url)
+            out.append(res if res is not None else NO_VERDICT)
+        return out
+
+    async def _try_provider_batch_metered(
+        self, provider: _Provider, user_content: str, expected_len: int
+    ) -> tuple[list[Offer | None] | None, int | None, int | None]:
+        """Metered twin of ``_try_provider_batch`` used only by the flag-on path.
+
+        Behaves identically to ``_try_provider_batch`` (same payload, headers,
+        3-attempt loop, 429/auth handling) but additionally returns
+        ``(results, total_tokens, status)`` so the caller can feed
+        ``scheduler.record()``:
+          * ``results``      — parsed list, or None on failure/malformed output.
+          * ``total_tokens`` — ``usage.total_tokens`` if the response reports it,
+                               else None (caller substitutes the estimate).
+          * ``status``       — the most relevant HTTP status observed (200 on a
+                               clean parse; None when the parse itself failed so
+                               record() classifies it as a generic failure, not
+                               a false success).
+
+        Kept as a separate method on purpose so the flag-OFF path's
+        ``_try_provider_batch`` stays byte-for-byte unchanged. This duplicates
+        ~40 lines of transport logic; recommend consolidating the two into one
+        metered implementation in a later dedicated refactor (out of scope for
+        this flagged-wiring step).
+        """
+        payload = {
+            "model": provider.model,
+            "temperature": 0,
+            "reasoning_effort": "low",
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": BATCH_SYSTEM_PROMPT.format(
+                        today=datetime.now(timezone.utc).date().isoformat(),
+                        categories=category_prompt_csv(),
+                        offer_types=offer_type_prompt_csv(),
+                    ),
+                },
+                {"role": "user", "content": user_content},
+            ],
+        }
+        headers = {
+            "Authorization": f"Bearer {provider.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/freebies-aggregator",
+            "X-Title": "Freebies Aggregator",
+        }
+        last_status: int | None = None
+        for attempt in range(1, 4):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    resp = await client.post(
+                        f"{provider.base_url}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                    )
+                last_status = resp.status_code
+                if resp.status_code == 429:
+                    retry_after = float(resp.headers.get("Retry-After", 2 ** attempt))
+                    log.warning("[%s] 429 (batch) — retrying in %.1fs", provider.base_url, retry_after)
+                    await asyncio.sleep(retry_after + 0.5)
+                    continue
+                if resp.status_code in (401, 403):
+                    log.warning("[%s] auth error %d — skipping provider", provider.base_url, resp.status_code)
+                    return None, None, resp.status_code
+                resp.raise_for_status()
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"]
+                parsed = self._parse_batch(content, expected_len)
+                tokens: int | None = None
+                usage = data.get("usage") if isinstance(data, dict) else None
+                if isinstance(usage, dict):
+                    tokens = usage.get("total_tokens")
+                # A None parse is a failure, not a success: return status=None so
+                # record() counts it as a generic failure rather than a 2xx win.
+                return parsed, tokens, (200 if parsed is not None else None)
+            except httpx.HTTPStatusError as exc:
+                last_status = exc.response.status_code
+                log.warning("[%s] HTTP %s (batch attempt %d/3)", provider.base_url, exc.response.status_code, attempt)
+                await asyncio.sleep(2 ** attempt)
+            except (httpx.HTTPError, KeyError, json.JSONDecodeError) as exc:
+                log.warning("[%s] batch call failed (attempt %d/3): %s", provider.base_url, attempt, exc)
+                await asyncio.sleep(2 ** attempt)
+        return None, None, last_status
 
     async def _try_provider(self, provider: _Provider, user_content: str) -> Offer | None:
         payload = {
