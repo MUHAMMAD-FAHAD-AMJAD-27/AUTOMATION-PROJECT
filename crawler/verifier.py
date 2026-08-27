@@ -575,11 +575,10 @@ class LLMExtractor:
                                record() classifies it as a generic failure, not
                                a false success).
 
-        Kept as a separate method on purpose so the flag-OFF path's
-        ``_try_provider_batch`` stays byte-for-byte unchanged. This duplicates
-        ~40 lines of transport logic; recommend consolidating the two into one
-        metered implementation in a later dedicated refactor (out of scope for
-        this flagged-wiring step).
+        Kept as the single batch-transport implementation: the flag-OFF
+        ``_try_provider_batch`` is a thin wrapper that calls this and drops the
+        ``(tokens, status)`` extras, so both paths share one code path and can
+        no longer drift (Phase 20 tech-debt 3a consolidation).
         """
         payload = {
             "model": provider.model,
@@ -696,60 +695,21 @@ class LLMExtractor:
     async def _try_provider_batch(
         self, provider: _Provider, user_content: str, expected_len: int
     ) -> list[Offer | None] | None:
-        payload = {
-            "model": provider.model,
-            "temperature": 0,
-            # Batch extraction is mechanical (parse posts -> JSON in a fixed
-            # shape), not a hard reasoning task. Ask reasoning-capable models for
-            # minimal thinking to cut latency and token cost. OpenRouter drops
-            # unsupported params by default, so non-reasoning providers ignore
-            # it rather than erroring.
-            "reasoning_effort": "low",
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {
-                    "role": "system",
-                    "content": BATCH_SYSTEM_PROMPT.format(
-                        today=datetime.now(timezone.utc).date().isoformat(),
-                        categories=category_prompt_csv(),
-                        offer_types=offer_type_prompt_csv(),
-                    ),
-                },
-                {"role": "user", "content": user_content},
-            ],
-        }
-        headers = {
-            "Authorization": f"Bearer {provider.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/freebies-aggregator",
-            "X-Title": "Freebies Aggregator",
-        }
-        for attempt in range(1, 4):
-            try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    resp = await client.post(
-                        f"{provider.base_url}/chat/completions",
-                        json=payload,
-                        headers=headers,
-                    )
-                if resp.status_code == 429:
-                    retry_after = float(resp.headers.get("Retry-After", 2 ** attempt))
-                    log.warning("[%s] 429 (batch) — retrying in %.1fs", provider.base_url, retry_after)
-                    await asyncio.sleep(retry_after + 0.5)
-                    continue
-                if resp.status_code in (401, 403):
-                    log.warning("[%s] auth error %d — skipping provider", provider.base_url, resp.status_code)
-                    return None
-                resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"]
-                return self._parse_batch(content, expected_len)
-            except httpx.HTTPStatusError as exc:
-                log.warning("[%s] HTTP %s (batch attempt %d/3)", provider.base_url, exc.response.status_code, attempt)
-                await asyncio.sleep(2 ** attempt)
-            except (httpx.HTTPError, KeyError, json.JSONDecodeError) as exc:
-                log.warning("[%s] batch call failed (attempt %d/3): %s", provider.base_url, attempt, exc)
-                await asyncio.sleep(2 ** attempt)
-        return None
+        """Fixed-order (flag-off) batch call: parsed results, or None on failure.
+
+        Thin wrapper over ``_try_provider_batch_metered`` — the metered twin
+        already performs the identical transport (same payload, headers,
+        3-attempt loop, 429/auth handling, ``_parse_batch``) and additionally
+        returns ``(tokens, status)`` for the scheduler. This path just discards
+        those two extras, so the two methods can no longer drift apart. The
+        ``results`` element is byte-for-byte what this method returned before
+        consolidation in every branch (429→retry, 401/403→None, clean parse→
+        ``_parse_batch`` result, exhausted retries→None).
+        """
+        results, _tokens, _status = await self._try_provider_batch_metered(
+            provider, user_content, expected_len
+        )
+        return results
 
     def _build_user_content(self, item: NormalizedItem, primary_url: CanonicalURL | None) -> str:
         parts = [
