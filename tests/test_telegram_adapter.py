@@ -172,3 +172,11 @@ def test_join_candidates_joins_only_approved_when_enabled(_clean_env, monkeypatc
     assert client.joined == ["approvedchan"]
     assert any("status = 'approved'" in q for q in fake.cur.queries)
     assert not any("status = 'new'" in q for q in fake.cur.queries)
+
+
+def test_discovery_seed_terms_cover_all_tiers_no_dupes():
+    terms = tg.DISCOVERY_SEED_TERMS
+    assert len(terms) == len(set(terms)), "seed terms must be unique"
+    # one representative term per proposed tier is present
+    for expected in ("free credits", "gpu credits", "startup credits", "developer perks"):
+        assert expected in terms

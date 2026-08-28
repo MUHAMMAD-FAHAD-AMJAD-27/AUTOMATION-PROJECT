@@ -36,6 +36,7 @@ dependencies minimal. Swap to asyncpg/psycopg_pool for higher throughput.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -135,6 +136,22 @@ def _build_client(creds: TelegramCredentials) -> TelegramClient:
 BACKFILL_LIMIT = 50          # max messages pulled per channel per run (delta safety)
 SEARCH_CADENCE_SECONDS = 3600  # how often auto-discovery scans run
 MONITOR_CADENCE_SECONDS = 300  # delta-pull cadence (fallback when no event loop)
+
+# Auto-discovery seed terms (Phase 3), grouped by theme. Broad on purpose: every
+# discovered channel lands as 'new' and passes the manual approval gate before
+# any join (see _join_candidates / TG_AUTO_JOIN), so wide coverage costs nothing.
+# Single source of truth — used both to seed the telegram:default source config
+# and to drive _discovery_scan.
+DISCOVERY_SEED_TERMS: list[str] = [
+    # core
+    "free credits", "student pack", "free tier", "coupon", "developer discount",
+    # compute / GPU (recurring-credit patterns like Modal's monthly grant)
+    "gpu credits", "compute credits", "free api credits", "llm api free",
+    # programs / bundles
+    "startup credits", "founder program", "cloud credits", "student developer pack",
+    # aggregator / perk drops
+    "developer perks", "free saas", "open source credits",
+]
 
 
 def _channels_to_monitor() -> list[tuple[str, str, int]]:
@@ -413,15 +430,16 @@ async def run_telegram_monitor() -> None:
     log.info("Connected as %s (id=%s)", me.username, me.id)
 
     # Register the default source if missing.
+    default_config = json.dumps({"delta_pull": True, "search_terms": DISCOVERY_SEED_TERMS})
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO sources (name, kind, config)
-                VALUES ('telegram:default', 'telegram',
-                        '{"delta_pull":true,"search_terms":["free credits","student pack","free tier","coupon","developer discount"]}')
+                VALUES ('telegram:default', 'telegram', %s::jsonb)
                 ON CONFLICT (name) DO NOTHING
                 """,
+                (default_config,),
             )
         conn.commit()
 
@@ -438,7 +456,7 @@ async def run_telegram_monitor() -> None:
         await _join_candidates(client, source_name)
 
         if asyncio.get_event_loop().time() - last_discovery > SEARCH_CADENCE_SECONDS:
-            await _discovery_scan(client, source_name, ["free credits", "student pack", "free tier"])
+            await _discovery_scan(client, source_name, DISCOVERY_SEED_TERMS)
             last_discovery = asyncio.get_event_loop().time()
 
         await asyncio.sleep(MONITOR_CADENCE_SECONDS)
