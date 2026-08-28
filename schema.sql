@@ -173,7 +173,7 @@ CREATE TABLE IF NOT EXISTS discovered_channels (   -- auto-join discovery regist
     title            TEXT,
     member_count     INT,
     status           TEXT NOT NULL DEFAULT 'new'
-                     CHECK (status IN ('new','joined','failed','dropped')),
+                     CHECK (status IN ('new','approved','joined','failed','dropped')),
     discovered_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_check       TIMESTAMPTZ
 );

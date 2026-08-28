@@ -24,6 +24,9 @@ Usage (from anywhere):
     python run.py ingest-deep-web --category ai_apis
     python run.py ingest-deep-web --engine serper
     python run.py status                     # read-only system health snapshot
+    python run.py list-discovered            # review auto-discovery queue
+    python run.py list-discovered new        # ...filtered by status
+    python run.py approve-channel <id>       # promote 'new' -> 'approved'
 
 With a standard python.org / venv Python you can equally use:
     python -m crawler.pipeline --dry-run
@@ -132,6 +135,35 @@ def run_status(argv: list[str]) -> int:
     return main(argv)
 
 
+def run_list_discovered(argv: list[str]) -> int:
+    """Print the auto-discovery review queue. Optional arg filters by status
+    (e.g. `new`). Read-only."""
+    from adapters.telegram_adapter import list_discovered
+
+    rows = list_discovered(argv[0] if argv else None)
+    if not rows:
+        print("(no discovered channels)")
+        return 0
+    for r in rows:
+        print(
+            f"#{r['id']:<5} {r['status']:<9} @{r['channel_username']:<24} "
+            f"members={r['member_count']}  {r['title']!r}"
+        )
+    return 0
+
+
+def run_approve_channel(argv: list[str]) -> int:
+    """Promote a discovered channel from 'new' to 'approved' by id."""
+    if not argv:
+        print("usage: python run.py approve-channel <id>", file=sys.stderr)
+        return 2
+    from adapters.telegram_adapter import approve_channel
+
+    ok = approve_channel(int(argv[0]))
+    print("approved" if ok else "no 'new' channel with that id (already approved/joined?)")
+    return 0 if ok else 1
+
+
 COMMANDS = {
     "pipeline":           run_pipeline,
     "dispatcher":         run_dispatcher,
@@ -145,6 +177,8 @@ COMMANDS = {
     "ingest-firecrawl":   run_ingest_firecrawl,
     "scheduler":          run_scheduler,
     "status":             run_status,
+    "list-discovered":    run_list_discovered,
+    "approve-channel":    run_approve_channel,
 }
 
 

@@ -291,8 +291,27 @@ async def _discovery_scan(client: TelegramClient, source_name: str, terms: list[
             _health(source_id, ok=False, error=f"discovery scan failed for {term!r}: {exc}")
 
 
+def _auto_join_enabled() -> bool:
+    """Whether the discovery auto-join step may run. Default OFF.
+
+    Two-stage human gate so nothing is ever joined blindly: discovery writes
+    candidates as 'new' (never joined) -> a human promotes chosen rows to
+    'approved' (see approve_channel / the `approve-channel` CLI) -> only then,
+    and only when TG_AUTO_JOIN is on, does _join_candidates join them.
+    """
+    return os.environ.get("TG_AUTO_JOIN", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 async def _join_candidates(client: TelegramClient, source_name: str) -> None:
-    """Join discovered channels flagged with status='new' (opt-in review loop)."""
+    """Join channels a human has promoted to status='approved'.
+
+    Gated: returns immediately unless TG_AUTO_JOIN is on, and only ever joins
+    'approved' rows — never the 'new' rows discovery writes. This is the
+    opt-in review loop (discovery -> manual approval -> join).
+    """
+    if not _auto_join_enabled():
+        log.info("Auto-join disabled (TG_AUTO_JOIN off); leaving approved channels unjoined")
+        return
     source_id = _source_id(source_name)
     with connect() as conn:
         with conn.cursor() as cur:
@@ -300,7 +319,7 @@ async def _join_candidates(client: TelegramClient, source_name: str) -> None:
                 """
                 SELECT d.channel_username FROM discovered_channels d
                 JOIN sources s ON s.id = d.source_id
-                WHERE d.status = 'new' AND s.name = %s
+                WHERE d.status = 'approved' AND s.name = %s
                 LIMIT 5
                 """,
                 (source_name,),
@@ -335,6 +354,46 @@ async def _join_candidates(client: TelegramClient, source_name: str) -> None:
         except Exception as exc:  # noqa: BLE001
             log.warning("join failed for %s: %s", username, exc)
             _health(source_id, ok=False, error=f"join failed for {username}: {exc}")
+
+
+def list_discovered(status: str | None = None) -> list[dict]:
+    """Return discovered channels (optionally filtered by status), newest first.
+
+    Read-only. Backs the `list-discovered` review CLI so a human can see what
+    auto-discovery has queued before approving anything.
+    """
+    with connect() as conn:
+        with conn.cursor() as cur:
+            if status:
+                cur.execute(
+                    "SELECT id, channel_username, title, member_count, status, discovered_at "
+                    "FROM discovered_channels WHERE status = %s ORDER BY id DESC",
+                    (status,),
+                )
+            else:
+                cur.execute(
+                    "SELECT id, channel_username, title, member_count, status, discovered_at "
+                    "FROM discovered_channels ORDER BY id DESC"
+                )
+            return list(cur.fetchall())
+
+
+def approve_channel(channel_id: int) -> bool:
+    """Promote one discovered channel 'new' -> 'approved'.
+
+    Returns True iff a row changed (a 'new' row with that id existed). Approved
+    rows are eligible for joining, but only when TG_AUTO_JOIN is on.
+    """
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE discovered_channels SET status = 'approved' "
+                "WHERE id = %s AND status = 'new'",
+                (channel_id,),
+            )
+            changed = cur.rowcount
+        conn.commit()
+    return changed > 0
 
 
 async def run_telegram_monitor() -> None:

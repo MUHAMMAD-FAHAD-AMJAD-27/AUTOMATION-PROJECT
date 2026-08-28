@@ -84,3 +84,91 @@ def test_load_credentials_blank_session_string_is_none(_clean_env):
 def test_load_credentials_none_when_required_missing(_clean_env):
     _clean_env.setenv("TG_API_ID", "123")  # api_hash + phone still missing
     assert tg._load_credentials() is None
+
+
+# --------------------------------------------------------------------------- #
+# Auto-join approval gate
+# --------------------------------------------------------------------------- #
+import asyncio
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [(None, False), ("0", False), ("", False), ("off", False),
+     ("1", True), ("true", True), ("YES", True), ("on", True)],
+)
+def test_auto_join_enabled_truth_table(_clean_env, value, expected):
+    if value is not None:
+        _clean_env.setenv("TG_AUTO_JOIN", value)
+    assert tg._auto_join_enabled() is expected
+
+
+class _FakeCursor:
+    def __init__(self, rows):
+        self._rows = rows
+        self.queries: list[str] = []
+
+    def execute(self, sql, params=None):
+        self.queries.append(sql)
+
+    def fetchall(self):
+        return self._rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, rows):
+        self.cur = _FakeCursor(rows)
+
+    def cursor(self):
+        return self.cur
+
+    def commit(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _RecordingClient:
+    def __init__(self):
+        self.joined: list[str] = []
+
+    def __call__(self, request):  # request is patched to be the bare username
+        self.joined.append(request)
+
+        async def _noop():
+            return None
+
+        return _noop()
+
+
+def test_join_candidates_skips_when_disabled(_clean_env, monkeypatch):
+    _clean_env.setenv("TG_AUTO_JOIN", "0")
+    # _source_id must never be reached when the gate is off.
+    monkeypatch.setattr(tg, "_source_id", lambda name: pytest.fail("gate leaked: _source_id called"))
+    client = _RecordingClient()
+    asyncio.run(tg._join_candidates(client, "telegram:default"))
+    assert client.joined == []
+
+
+def test_join_candidates_joins_only_approved_when_enabled(_clean_env, monkeypatch):
+    _clean_env.setenv("TG_AUTO_JOIN", "1")
+    monkeypatch.setattr(tg, "_source_id", lambda name: 1)
+    fake = _FakeConn([{"channel_username": "approvedchan"}])
+    monkeypatch.setattr(tg, "connect", lambda: fake)
+    monkeypatch.setattr(tg, "JoinChannelRequest", lambda username: username)
+    client = _RecordingClient()
+    asyncio.run(tg._join_candidates(client, "telegram:default"))
+    # joined exactly the approved candidate, and the SELECT filtered on 'approved'
+    assert client.joined == ["approvedchan"]
+    assert any("status = 'approved'" in q for q in fake.cur.queries)
+    assert not any("status = 'new'" in q for q in fake.cur.queries)
