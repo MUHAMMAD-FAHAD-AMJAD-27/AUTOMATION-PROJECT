@@ -472,14 +472,24 @@ def _get_or_create_source(source_name: str, platform: str, handle: str) -> int:
 # Default creator list — edit this or manage via DB sources.config.
 # Format: (platform, handle)
 # platform: "linktree" | "bento" | "telegram_web"
+#
+# NOTE (2026-08-27): linktree and bento entries are DISABLED — verified dead:
+#   * linktr.ee/<handle>            → HTTP 403 (Linktree now bot-blocks
+#                                     server-side scraping for every handle)
+#   * api.bento.me/v1/profile/<h>   → HTTP 530 (origin unreachable for every
+#                                     handle)
+# They only produced per-run health failures and wasted fetch time. The
+# _parse_linktree / _fetch_bento code is retained; re-add the tuples below to
+# revive these platforms if/when they stop blocking. Telegram t.me/s/ channels
+# remain live and are the sole creator-mirror source for now.
 DEFAULT_CREATORS: list[tuple[str, str]] = [
-    # --- Linktree profiles of dev-deal creators ---
-    ("linktree", "github"),           # github's official linktree (stable)
-    ("linktree", "awsdevelopers"),
-    ("linktree", "googledevs"),
-    # --- Bento.me profiles ---
-    ("bento",    "theo"),             # theo.gg — prominent dev creator
-    ("bento",    "fireship"),
+    # --- Linktree profiles (DISABLED 2026-08-27: linktr.ee returns 403) ---
+    # ("linktree", "github"),           # github's official linktree (stable)
+    # ("linktree", "awsdevelopers"),
+    # ("linktree", "googledevs"),
+    # --- Bento.me profiles (DISABLED 2026-08-27: api.bento.me returns 530) ---
+    # ("bento",    "theo"),             # theo.gg — prominent dev creator
+    # ("bento",    "fireship"),
     # --- Public Telegram channels (no login, t.me/s/) ---
     ("telegram_web", "freestuffdev"),
     ("telegram_web", "dev_resources"),
@@ -512,12 +522,16 @@ RSS_FEEDS: list[RSSFeed] = [
         refresh_hours=2,
         category_hint=None,
     ),
-    RSSFeed(
-        name="reddit_freebies",
-        url="https://www.reddit.com/r/freebies/.rss",
-        refresh_hours=3,
-        category_hint="coupon",
-    ),
+    # DISABLED 2026-08-27: r/freebies is a CONSUMER freebies feed (retail
+    # samples / coupons), not developer freebies. Its items match the "free/
+    # coupon" prefilter hints and pass through, spending LLM budget on
+    # off-target content. Code retained — uncomment to re-enable.
+    # RSSFeed(
+    #     name="reddit_freebies",
+    #     url="https://www.reddit.com/r/freebies/.rss",
+    #     refresh_hours=3,
+    #     category_hint="coupon",
+    # ),
     RSSFeed(
         name="reddit_sideproject",
         url="https://www.reddit.com/r/SideProject/.rss",
@@ -581,14 +595,24 @@ def _parse_rss(xml_text: str) -> list[dict]:
 
 
 def _parse_github_trending_html(html: str) -> list[dict]:
-    """Extract repo cards from GitHub /trending page HTML (no JS needed for SSR)."""
+    """Extract repo cards from GitHub /trending page HTML (no JS needed for SSR).
+
+    GitHub's trending markup wraps each repo's name in
+    ``<h2 class="h3 lh-condensed"><a ... href="/owner/repo">``. The anchor now
+    carries several ``data-hydro-*`` attributes *before* ``href``, and its inner
+    text is svg + owner/repo spans, so we match by the stable ``lh-condensed``
+    heading class and read the slug straight from ``href`` (the reliable signal)
+    rather than the brittle visible text.
+    """
     items: list[dict] = []
-    # Each trending repo is in an <article> with a relative href like /owner/repo
-    for m in re.finditer(r'<h2[^>]*>\s*<a\s+href="/([^/"]+/[^/"]+)"[^>]*>(.*?)</a>', html, re.DOTALL):
+    pattern = re.compile(
+        r'<h2\s+class="[^"]*\blh-condensed\b[^"]*">\s*<a\b[^>]*\bhref="/([^/"]+/[^/"]+)"',
+        re.DOTALL,
+    )
+    for m in pattern.finditer(html):
         slug = m.group(1).strip()
-        raw_title = re.sub(r"\s+", " ", m.group(2)).strip()
         url = f"https://github.com/{slug}"
-        items.append({"title": raw_title or slug, "url": url, "summary": "", "published_at": ""})
+        items.append({"title": slug, "url": url, "summary": "", "published_at": ""})
     return items[:25]  # top 25 is enough
 
 
@@ -668,10 +692,17 @@ async def run_rss_feeds(
         follow_redirects=True,
         timeout=20.0,
     ) as client:
-        for feed in feeds:
+        for idx_feed, feed in enumerate(feeds):
             if max_items is not None and total >= max_items:
                 log.info("RSS feeds hit max_items=%d — stopping", max_items)
                 break
+            # Inter-feed pacing to avoid self-inflicted rate limits. Reddit's
+            # public .rss is strict about bursts (back-to-back calls → 429), so
+            # give reddit feeds a wider gap. Applied before every fetch except
+            # the first — and, unlike the old tail sleep, also after a failed
+            # fetch, so a 429 can't immediately trigger the next request.
+            if idx_feed > 0:
+                await asyncio.sleep(5.0 if "reddit.com" in feed.url else 1.5)
             source_name = f"rss:{feed.name}"
             # Resolve source_id up front so a failed fetch is still recorded on the feed's source.
             source_id = None if dry_run else _get_or_create_source(source_name, "rss", feed.name)
@@ -710,8 +741,8 @@ async def run_rss_feeds(
                 continue
 
             _health(source_id, ok=True)
-            log.info("  %s → %d items ingested", feed.name, payloads_written)
-            await asyncio.sleep(1.5)
+            log.info("  %s → %d items %s", feed.name, payloads_written,
+                     "would be written (dry-run)" if dry_run else "ingested")
 
     return total
 
