@@ -618,8 +618,15 @@ class LLMExtractor:
                     log.warning("[%s] 429 (batch) — retrying in %.1fs", provider.base_url, retry_after)
                     await asyncio.sleep(retry_after + 0.5)
                     continue
-                if resp.status_code in (401, 403):
-                    log.warning("[%s] auth error %d — skipping provider", provider.base_url, resp.status_code)
+                if 400 <= resp.status_code < 500:
+                    # Non-429 client errors (400/401/403/422 …) are request-side
+                    # faults: the identical payload will fail identically, so
+                    # retrying it 3× only wastes time before we fall to the next
+                    # provider. Skip immediately and log a body snippet so the root
+                    # cause (e.g. a field the provider rejects) is actually visible.
+                    snippet = (resp.text or "").replace("\n", " ")[:300]
+                    log.warning("[%s] HTTP %d (batch) non-retryable — skipping provider: %s",
+                                provider.base_url, resp.status_code, snippet)
                     return None, None, resp.status_code
                 resp.raise_for_status()
                 data = resp.json()
@@ -678,9 +685,14 @@ class LLMExtractor:
                     log.warning("[%s] 429 — retrying in %.1fs", provider.base_url, retry_after)
                     await asyncio.sleep(retry_after + 0.5)
                     continue
-                if resp.status_code in (401, 403):
-                    log.warning("[%s] auth error %d — skipping provider", provider.base_url, resp.status_code)
-                    return None   # wrong key → move to next provider immediately
+                if 400 <= resp.status_code < 500:
+                    # Non-429 client errors are request-side faults — retrying the
+                    # identical payload will fail identically. Skip to the next
+                    # provider now and log a body snippet for the root cause.
+                    snippet = (resp.text or "").replace("\n", " ")[:300]
+                    log.warning("[%s] HTTP %d non-retryable — skipping provider: %s",
+                                provider.base_url, resp.status_code, snippet)
+                    return None   # bad request/key → move to next provider immediately
                 resp.raise_for_status()
                 content = resp.json()["choices"][0]["message"]["content"]
                 return self._parse(content)
