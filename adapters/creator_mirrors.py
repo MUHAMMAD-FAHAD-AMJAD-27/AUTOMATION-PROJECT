@@ -496,6 +496,11 @@ DEFAULT_CREATORS: list[tuple[str, str]] = [
     ("telegram_web", "programmingtools"),
     ("telegram_web", "cloudcredits"),
     ("telegram_web", "aitools_free"),
+    # Added 2026-08-28 to close the open_source_repo gap. Both verified public
+    # from a US dyno before landing here (t.me is ISP-blocked locally):
+    # code_stars -> HTTP 200, 20 posts parsed; opensource_findings -> 200, 25.
+    ("telegram_web", "code_stars"),
+    ("telegram_web", "opensource_findings"),
 ]
 
 # --------------------------------------------------------------------------- #
