@@ -17,7 +17,9 @@ Fallback / higher-volume: Serper API (set SERPER_API_KEY env var)
 Usage:
     python -m adapters.deep_web_adapter                  # all categories
     python -m adapters.deep_web_adapter --dry-run
-    python -m adapters.deep_web_adapter --category ai_apis
+    python -m adapters.deep_web_adapter --list-categories # show valid categories
+    python -m adapters.deep_web_adapter --category ai_apis      # a raw query tag
+    python -m adapters.deep_web_adapter --category ai_tools     # a run-category
     python -m adapters.deep_web_adapter --lookback month  # d|w|m|y
     python -m adapters.deep_web_adapter --engine serper   # force Serper
 
@@ -589,14 +591,28 @@ async def run_deep_web(
     # including the serper->ddg downgrade above — otherwise a keyless serper run
     # would fall back to ddg while still carrying the serper-only queries.
     if category_filter:
-        # An explicit single-tag request is a deliberate human act, so it is
-        # allowed to select a gated tag (this is the only way to reach
-        # aggregator_fraud, e.g. `--category aggregator_fraud`).
-        templates = [
-            (cat, q) for cat, q in (templates or QUERY_TEMPLATES) if cat == category_filter
-        ]
+        # `--category` accepts EITHER a raw query tag (e.g. ai_apis) OR a
+        # scheduler run-category (e.g. ai_tools, which fans out to several tags
+        # via RUN_CATEGORY_TO_TAGS). Try an exact query-tag match FIRST so every
+        # previously-working `--category <tag>` is byte-for-byte unchanged
+        # (this is also the only way to reach a gated tag like aggregator_fraud —
+        # a deliberate human act). Only if no tag matches do we fall back to the
+        # run-category mapping, which is what makes `--category ai_tools` work.
+        base = templates or QUERY_TEMPLATES
+        exact_tag = [(cat, q) for cat, q in base if cat == category_filter]
+        if exact_tag:
+            templates = exact_tag
+        elif category_filter in RUN_CATEGORY_TO_TAGS:
+            templates = templates_for_run_category(category_filter, engine)
+        else:
+            templates = []
         if not templates:
-            log.warning("No templates found for category %r", category_filter)
+            valid = sorted(set(RUN_CATEGORY_TO_TAGS) | {c for c, _ in QUERY_TEMPLATES})
+            log.warning(
+                "No templates for category %r. Valid categories (run-categories "
+                "and query tags): %s",
+                category_filter, ", ".join(valid),
+            )
             return 0
     else:
         # default_templates(), never raw QUERY_TEMPLATES — the raw list contains
@@ -697,7 +713,8 @@ async def run_deep_web(
             _health(source_id, ok=True)
             await asyncio.sleep(INTER_QUERY_DELAY)
 
-    log.info("Deep web adapter done: %d items written", total)
+    log.info("Deep web adapter done: %d items %s", total,
+             "would be written (dry-run)" if dry_run else "written")
     return total
 
 
@@ -713,8 +730,14 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--engine", choices=["ddg", "serper"], default=None,
                         help="search engine (default: DEEP_WEB_ENGINE env var or ddg)")
+    _run_cats = ", ".join(sorted(RUN_CATEGORY_TO_TAGS))
+    _query_tags = ", ".join(sorted({c for c, _ in QUERY_TEMPLATES}))
     parser.add_argument("--category", default=None,
-                        help="run only templates for this category tag")
+                        help="run only templates for this category. Accepts a "
+                             f"run-category [{_run_cats}] or a raw query tag "
+                             f"[{_query_tags}]")
+    parser.add_argument("--list-categories", action="store_true",
+                        help="print all valid --category values and exit")
     parser.add_argument(
         "--lookback", default=DEFAULT_LOOKBACK,
         choices=["d", "w", "m", "y"],
@@ -730,6 +753,18 @@ def main() -> None:
              "the scheduler uses this so no tag on a lane starves the others",
     )
     args = parser.parse_args()
+
+    if args.list_categories:
+        run_cats = sorted(RUN_CATEGORY_TO_TAGS)
+        query_tags = sorted({c for c, _ in QUERY_TEMPLATES})
+        print("Run-categories (each fans out to one or more query tags):")
+        for rc in run_cats:
+            tags = RUN_CATEGORY_TO_TAGS[rc] or ["<all templates>"]
+            print(f"  {rc:20} -> {', '.join(tags)}")
+        print("\nRaw query tags (use any as --category for a single-tag run):")
+        for qt in query_tags:
+            print(f"  {qt}")
+        return
 
     asyncio.run(run_deep_web(
         engine=args.engine,
