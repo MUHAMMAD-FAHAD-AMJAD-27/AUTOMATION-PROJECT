@@ -42,6 +42,7 @@ from dataclasses import dataclass
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
+from telethon.sessions import StringSession
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import GetHistoryRequest, SearchRequest
 from telethon.tl.types import Message, InputMessagesFilterEmpty
@@ -68,6 +69,7 @@ class TelegramCredentials:
     api_hash: str
     phone: str
     session_dir: str
+    session_string: str | None = None
 
 
 # Must be present AND non-blank. Note crawler.db calls load_dotenv(override=True),
@@ -99,13 +101,36 @@ def _load_credentials() -> TelegramCredentials | None:
         return None
 
     session_dir = os.environ.get("TG_SESSION_DIR", "./sessions")
-    os.makedirs(session_dir, exist_ok=True)
+    # Heroku's filesystem is ephemeral, so a file-based .session is wiped on every
+    # dyno restart (~daily) — forcing a re-login the unattended dyno cannot perform.
+    # TG_SESSION_STRING (a portable StringSession) is therefore the preferred auth
+    # on Heroku; the file path stays as the local-dev fallback. A blank value
+    # overrides a real exported shell value (crawler.db load_dotenv(override=True)),
+    # so treat "" as unset — same rule as the _REQUIRED_ENV emptiness check.
+    session_string = os.environ.get("TG_SESSION_STRING", "").strip() or None
     return TelegramCredentials(
         api_id=api_id,
         api_hash=os.environ["TG_API_HASH"].strip(),
         phone=os.environ["TG_PHONE"].strip(),
         session_dir=session_dir,
+        session_string=session_string,
     )
+
+
+def _build_client(creds: TelegramCredentials) -> TelegramClient:
+    """Construct a TelegramClient from the appropriate session backend.
+
+    Prefers an in-memory StringSession when TG_SESSION_STRING is set (survives
+    Heroku's ephemeral filesystem); otherwise falls back to a file-based session
+    under session_dir for local development. Constructing the client does NOT
+    connect to Telegram — authentication happens later in client.start().
+    """
+    if creds.session_string:
+        log.info("Telegram: authenticating via TG_SESSION_STRING (in-memory session)")
+        return TelegramClient(StringSession(creds.session_string), creds.api_id, creds.api_hash)
+    os.makedirs(creds.session_dir, exist_ok=True)
+    log.info("Telegram: using file-based session at %s/ingest.session", creds.session_dir)
+    return TelegramClient(f"{creds.session_dir}/ingest", creds.api_id, creds.api_hash)
 
 BACKFILL_LIMIT = 50          # max messages pulled per channel per run (delta safety)
 SEARCH_CADENCE_SECONDS = 3600  # how often auto-discovery scans run
@@ -323,7 +348,7 @@ async def run_telegram_monitor() -> None:
         log.warning("run_telegram_monitor: skipping Telegram monitor — no usable credentials")
         return
 
-    client = TelegramClient(f"{creds.session_dir}/ingest", creds.api_id, creds.api_hash)
+    client = _build_client(creds)
     await client.start(phone=creds.phone, password=lambda: os.environ.get("TG_PASSWORD", ""))
     me = await client.get_me()
     log.info("Connected as %s (id=%s)", me.username, me.id)
@@ -370,7 +395,7 @@ async def sync_once() -> None:
         log.warning("sync_once: skipping Telegram sync — no usable credentials")
         return
 
-    client = TelegramClient(f"{creds.session_dir}/ingest", creds.api_id, creds.api_hash)
+    client = _build_client(creds)
     await client.start(phone=creds.phone, password=lambda: os.environ.get("TG_PASSWORD", ""))
     me = await client.get_me()
     log.info("sync_once connected as %s", me.username)
