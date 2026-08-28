@@ -20,3 +20,8 @@ sessions/
 # Local tooling
 .ruff_cache/
 .mypy_cache/
+
+# graphify knowledge-graph cache — content-hashed AST/semantic blobs, rewritten
+# on every run. The graph outputs (graph.json, graph.html, GRAPH_REPORT.md) stay
+# tracked; only this churn-heavy cache is ignored.
+graphify-out/cache/
