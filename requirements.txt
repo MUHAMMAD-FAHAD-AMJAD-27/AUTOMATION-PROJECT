@@ -15,12 +15,15 @@ duckduckgo-search>=6.0  # kept for environments that haven't upgraded yet
 ddgs>=0.1               # renamed package — used preferentially
 firecrawl-py==4.38.0    # V1FirecrawlApp / V1JsonConfig signature — pin exactly
 
-# Local embeddings (semantic dedup — no API key needed)
-# sentence-transformers downloads ~90 MB on first run and caches locally.
-# If you can't install torch, remove this line; the pipeline falls back to
-# exact SHA-256 URL dedup only (still works fine).
-sentence-transformers>=3.0
-torch>=2.2
+# Local embeddings (semantic dedup) — INTENTIONALLY OMITTED for Heroku.
+# torch + sentence-transformers exceed Heroku's 500 MB slug limit, so they are
+# not installed on the standard buildpack. The pipeline degrades gracefully:
+# verifier._load_st_model() returns None on import failure, embed() returns None,
+# and dedup falls back to exact SHA-256 URL hashing (crawler/pipeline.py, the
+# `dup:url` path that already runs before the semantic stage). Confirmed
+# acceptable at current data volume. To re-enable semantic dedup on a
+# slug-unconstrained host, reinstall locally:
+#     pip install "sentence-transformers>=3.0" "torch>=2.2"
 
 # Testing
 pytest>=8.0
