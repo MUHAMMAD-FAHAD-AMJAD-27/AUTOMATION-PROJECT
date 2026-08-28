@@ -210,7 +210,8 @@ async def run_producthunt(
             total += 1
 
     _health(source_id, ok=True)
-    log.info("producthunt adapter done: %d items written", total)
+    log.info("producthunt adapter done: %d items %s", total,
+             "would be written (dry-run)" if dry_run else "written")
     return total
 
 

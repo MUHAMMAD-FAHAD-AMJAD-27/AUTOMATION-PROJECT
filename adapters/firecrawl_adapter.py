@@ -345,7 +345,8 @@ async def run_firecrawl(
 
         _health(source_id, ok=True)
 
-    log.info("Firecrawl adapter done: %d items written", total)
+    log.info("Firecrawl adapter done: %d items %s", total,
+             "would be written (dry-run)" if dry_run else "written")
     return total
 
 

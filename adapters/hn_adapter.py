@@ -188,7 +188,8 @@ async def run_hn(
     # One health snapshot per source at the successful end of processing.
     _health(source_id, ok=True)
 
-    log.info("HN adapter done: %d items written", total_written)
+    log.info("HN adapter done: %d items %s", total_written,
+             "would be written (dry-run)" if dry_run else "written")
     return total_written
 
 

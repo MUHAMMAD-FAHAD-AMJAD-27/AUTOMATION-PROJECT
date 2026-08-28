@@ -207,7 +207,8 @@ async def run_devto(
             await asyncio.sleep(1.0)  # gentle pacing between tag queries
 
     _health(source_id, ok=True)
-    log.info("dev.to adapter done: %d items written", total)
+    log.info("dev.to adapter done: %d items %s", total,
+             "would be written (dry-run)" if dry_run else "written")
     return total
 
 
