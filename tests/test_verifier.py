@@ -87,6 +87,24 @@ def test_requirements_defaults():
 
 
 # --------------------------------------------------------------------------- #
+# Idea 3: evergreen / verification-gated classification
+# --------------------------------------------------------------------------- #
+def test_offer_evergreen_verification_default_off():
+    """New classification fields default to a safe, non-gated state."""
+    offer = Offer.model_validate(_valid_offer())
+    assert offer.is_evergreen is False
+    assert offer.verification is None
+
+
+def test_offer_evergreen_verification_roundtrip():
+    offer = Offer.model_validate(
+        _valid_offer(is_evergreen=True, verification="student")
+    )
+    assert offer.is_evergreen is True
+    assert offer.verification == "student"
+
+
+# --------------------------------------------------------------------------- #
 # Math helpers
 # --------------------------------------------------------------------------- #
 def test_cosine_identical_vectors():

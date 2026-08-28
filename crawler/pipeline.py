@@ -169,6 +169,8 @@ def write_offer(
                         "base_url": offer.base_url,
                         "github_repo": offer.github_repo,
                         "exact_steps": offer.exact_steps,
+                        "is_evergreen": offer.is_evergreen,
+                        "verification": offer.verification,
                     }
                 ),
             ),

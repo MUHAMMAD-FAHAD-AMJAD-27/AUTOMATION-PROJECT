@@ -109,6 +109,17 @@ class Offer(BaseModel):
                                     description="github.com/owner/repo if offer is an OSS project")
     exact_steps: list[str] = Field(default_factory=list,
                                    description="ordered step-by-step instructions to claim the offer")
+    # --- Idea 3: evergreen / verification-gated classification ---
+    is_evergreen: bool = Field(
+        default=False,
+        description="true if the offer renews or persists rather than expiring on a one-time "
+                    "deadline (e.g. student packs renewable while enrolled, always-on free tiers)",
+    )
+    verification: str | None = Field(
+        default=None, max_length=60,
+        description="identity gate required to claim, if any: 'student' | 'teacher' | 'nonprofit' "
+                    "| 'veteran' | 'open_source_maintainer'; null if none",
+    )
 
     @field_validator("category")
     @classmethod
@@ -249,6 +260,11 @@ github_repo     str|null — Full github.com/owner/repo URL if the offer is an o
                            null if not applicable.
 exact_steps     list   — Ordered list of concrete steps to claim this offer, extracted verbatim
                          from the text. Empty list if no steps are described.
+is_evergreen    bool   — true if the offer renews/persists rather than expiring on a one-time
+                         deadline: student packs renewable while enrolled, always-on free tiers,
+                         verification-gated perks. false for one-time credits/coupons with a deadline.
+verification    str|null — identity gate required to claim, if any: "student", "teacher",
+                         "nonprofit", "veteran", "open_source_maintainer". null if anyone can claim.
 
 === CATEGORY VALUES ===
 {categories}
@@ -309,6 +325,11 @@ github_repo     str|null — Full github.com/owner/repo URL if the offer is an o
                            null if not applicable.
 exact_steps     list   — Ordered list of concrete steps to claim this offer, extracted verbatim
                          from the text. Empty list if no steps are described.
+is_evergreen    bool   — true if the offer renews/persists rather than expiring on a one-time
+                         deadline: student packs renewable while enrolled, always-on free tiers,
+                         verification-gated perks. false for one-time credits/coupons with a deadline.
+verification    str|null — identity gate required to claim, if any: "student", "teacher",
+                         "nonprofit", "veteran", "open_source_maintainer". null if anyone can claim.
 
 === CATEGORY VALUES ===
 {categories}
