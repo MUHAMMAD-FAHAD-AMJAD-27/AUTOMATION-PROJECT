@@ -149,8 +149,14 @@ DISCOVERY_SEED_TERMS: list[str] = [
     "gpu credits", "compute credits", "free api credits", "llm api free",
     # programs / bundles
     "startup credits", "founder program", "cloud credits", "student developer pack",
+    "startup perks", "aws activate", "azure for startups",
+    # student / education verification gates
+    "github student", ".edu discount",
+    # provider-named LLM drops (how free-key posts are actually worded)
+    "openrouter free", "free gemini api", "groq free", "free claude",
     # aggregator / perk drops
     "developer perks", "free saas", "open source credits",
+    "lifetime deal", "appsumo",
 ]
 
 
