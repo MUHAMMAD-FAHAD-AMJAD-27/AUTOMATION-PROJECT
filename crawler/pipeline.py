@@ -171,6 +171,7 @@ def write_offer(
                         "exact_steps": offer.exact_steps,
                         "is_evergreen": offer.is_evergreen,
                         "verification": offer.verification,
+                        "eligibility_required": offer.eligibility_required,
                     }
                 ),
             ),

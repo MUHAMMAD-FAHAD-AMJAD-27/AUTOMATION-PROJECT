@@ -83,6 +83,9 @@ class Requirements(BaseModel):
     geography: list[str] = Field(default_factory=list)
     enrollment: list[str] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)
+    # Idea 4: startup/founder-bundle eligibility gates, surfaced honestly
+    # (e.g. "pre-Series-B", "self-funded", "company website required").
+    eligibility: list[str] = Field(default_factory=list)
 
 
 class Offer(BaseModel):
@@ -119,6 +122,12 @@ class Offer(BaseModel):
         default=None, max_length=60,
         description="identity gate required to claim, if any: 'student' | 'teacher' | 'nonprofit' "
                     "| 'veteran' | 'open_source_maintainer'; null if none",
+    )
+    # --- Idea 4: startup/founder-bundle eligibility gating (honest surfacing) ---
+    eligibility_required: bool = Field(
+        default=False,
+        description="true if claiming requires qualifying as a company/startup (e.g. AWS Activate, "
+                    "Google/Azure startup programs); pair with requirements.eligibility details",
     )
 
     @field_validator("category")
@@ -246,9 +255,11 @@ value           num|null — Numeric amount ONLY if explicitly stated (e.g. "$30
 currency        str|null — 3-letter ISO code (USD, EUR…). null if not stated.
 expires_at      str|null — ISO-8601 datetime if a deadline exists. Relative ("ends Friday") →
                          best-effort absolute date using today: {today}. null if unknown.
-requirements    obj    — {{geography:[...], enrollment:[...], steps:[...]}}
+requirements    obj    — {{geography:[...], enrollment:[...], steps:[...], eligibility:[...]}}
                          geography: country/region restrictions. enrollment: "student email",
                          "credit card required", ".edu email", "18+". steps: sign-up actions.
+                         eligibility: startup/company gates ONLY — "pre-Series-B", "self-funded",
+                         "company website required", "< $X funding". Leave [] for consumer offers.
 confidence      float  — 0.0–1.0. Your certainty this is real and actionable.
 reasons         list   — Up to 3 short strings explaining the verdict.
 
@@ -265,6 +276,10 @@ is_evergreen    bool   — true if the offer renews/persists rather than expirin
                          verification-gated perks. false for one-time credits/coupons with a deadline.
 verification    str|null — identity gate required to claim, if any: "student", "teacher",
                          "nonprofit", "veteran", "open_source_maintainer". null if anyone can claim.
+eligibility_required bool — true ONLY for startup/founder/company programs (AWS Activate, Google/
+                         Azure for Startups, etc.) that require qualifying as a business. When true,
+                         put the concrete gates in requirements.eligibility. Never imply a gated
+                         program is universally claimable.
 
 === CATEGORY VALUES ===
 {categories}
@@ -311,9 +326,11 @@ value           num|null — Numeric amount ONLY if explicitly stated (e.g. "$30
 currency        str|null — 3-letter ISO code (USD, EUR…). null if not stated.
 expires_at      str|null — ISO-8601 datetime if a deadline exists. Relative ("ends Friday") →
                          best-effort absolute date using today: {today}. null if unknown.
-requirements    obj    — {{geography:[...], enrollment:[...], steps:[...]}}
+requirements    obj    — {{geography:[...], enrollment:[...], steps:[...], eligibility:[...]}}
                          geography: country/region restrictions. enrollment: "student email",
                          "credit card required", ".edu email", "18+". steps: sign-up actions.
+                         eligibility: startup/company gates ONLY — "pre-Series-B", "self-funded",
+                         "company website required", "< $X funding". Leave [] for consumer offers.
 confidence      float  — 0.0–1.0. Your certainty this is real and actionable.
 reasons         list   — Up to 3 short strings explaining the verdict.
 
@@ -330,6 +347,10 @@ is_evergreen    bool   — true if the offer renews/persists rather than expirin
                          verification-gated perks. false for one-time credits/coupons with a deadline.
 verification    str|null — identity gate required to claim, if any: "student", "teacher",
                          "nonprofit", "veteran", "open_source_maintainer". null if anyone can claim.
+eligibility_required bool — true ONLY for startup/founder/company programs (AWS Activate, Google/
+                         Azure for Startups, etc.) that require qualifying as a business. When true,
+                         put the concrete gates in requirements.eligibility. Never imply a gated
+                         program is universally claimable.
 
 === CATEGORY VALUES ===
 {categories}

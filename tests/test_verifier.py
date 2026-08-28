@@ -105,6 +105,31 @@ def test_offer_evergreen_verification_roundtrip():
 
 
 # --------------------------------------------------------------------------- #
+# Idea 4: founder/startup bundle eligibility (honest surfacing)
+# --------------------------------------------------------------------------- #
+def test_offer_eligibility_defaults_off():
+    offer = Offer.model_validate(_valid_offer())
+    assert offer.eligibility_required is False
+    assert offer.requirements.eligibility == []
+
+
+def test_offer_eligibility_required_with_gates():
+    offer = Offer.model_validate(
+        _valid_offer(
+            eligibility_required=True,
+            requirements={
+                "geography": [],
+                "enrollment": [],
+                "steps": [],
+                "eligibility": ["pre-Series-B", "company website required"],
+            },
+        )
+    )
+    assert offer.eligibility_required is True
+    assert "pre-Series-B" in offer.requirements.eligibility
+
+
+# --------------------------------------------------------------------------- #
 # Math helpers
 # --------------------------------------------------------------------------- #
 def test_cosine_identical_vectors():
