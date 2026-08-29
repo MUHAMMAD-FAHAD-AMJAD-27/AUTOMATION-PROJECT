@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
-import { AlertTriangle, Inbox, RefreshCw } from "lucide-react";
+import { AlertTriangle, Inbox } from "lucide-react";
 import Link from "next/link";
+import { RetryButton } from "./retry-button";
 
 export function Panel({
   title,
@@ -34,18 +35,8 @@ export function PanelError({ message }: { message: string }) {
         <AlertTriangle size={15} strokeWidth={1.8} aria-hidden />
         Failed to load this section
       </div>
-      <p className="text-muted">{message}</p>
-      <a
-        href="#"
-        onClick={(e) => {
-          e.preventDefault();
-          window.location.reload();
-        }}
-        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-raised px-2.5 py-1.5 text-xs text-fg hover:bg-bg"
-      >
-        <RefreshCw size={12} strokeWidth={1.8} aria-hidden />
-        Retry
-      </a>
+      <p className="break-words text-muted">{message}</p>
+      <RetryButton />
     </div>
   );
 }
