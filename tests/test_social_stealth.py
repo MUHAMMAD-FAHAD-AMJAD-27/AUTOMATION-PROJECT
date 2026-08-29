@@ -149,6 +149,101 @@ def test_twitter_empty_capture_yields_nothing():
 
 
 # --------------------------------------------------------------------------- #
+# Spam / quality floor (_is_junk_url)
+# --------------------------------------------------------------------------- #
+# Thresholds were measured, not guessed: across the 43 distinct URLs in the first
+# real x.com/search capture, length was min 14 / median 23 / max 137 and slash
+# count was min 2 / median 3 / max 5 — zero over 300 chars, zero over 12 slashes.
+# The floor runs before the LLM prefilter, so each drop is LLM spend avoided.
+#
+# _REAL_SPAM_URL is (a shortened form of) the actual junk found in that capture:
+# a ~2000-char URL padding keywords into the QUERY STRING, which is why slashes
+# are counted over the whole URL and not just the path.
+_REAL_SPAM_URL = (
+    "https://video.twimg.men/amplify_video/jzg2SUm?q="
+    + "/".join(["Ready", "sugar", "daddy", "hookup", "meet", "tonight", "dating",
+               "singles", "nearby", "chat", "live", "cam", "free", "join"] * 12)
+)
+# The longest LEGITIMATE URL observed in the same capture — must survive.
+_REAL_LONGEST_LEGIT_URL = (
+    "https://gujarati.news18.com/news/career/cbse-free-online-skill-courses-for-"
+    "students-registration-begins-know-how-to-apply-details-inside-1234567.html"
+)
+
+
+def test_junk_url_rejects_the_real_captured_spam():
+    assert len(_REAL_SPAM_URL) > 300
+    assert ss._is_junk_url(_REAL_SPAM_URL)
+
+
+def test_junk_url_accepts_the_longest_real_legitimate_url():
+    # 137 chars in the live capture; the 300-char cap leaves >2x headroom, so the
+    # floor drew zero false positives on real data.
+    assert len(_REAL_LONGEST_LEGIT_URL) < ss.MAX_URL_LENGTH
+    assert not ss._is_junk_url(_REAL_LONGEST_LEGIT_URL)
+    assert not ss._is_junk_url("https://cloud.example.com/students")
+
+
+def test_junk_url_rejects_slash_stuffing_even_when_short():
+    # Under the length cap but structurally absurd: real URLs topped out at 5
+    # slashes, so 12 is the ceiling and this clears it with a short string.
+    stuffed = "https://x.example/" + "/".join(str(i) for i in range(20))
+    assert len(stuffed) < ss.MAX_URL_LENGTH
+    assert stuffed.count("/") > ss.MAX_URL_SLASHES
+    assert ss._is_junk_url(stuffed)
+
+
+def test_junk_url_boundaries_are_inclusive_of_the_limit():
+    # Exactly at the limit is allowed; one over is not.
+    assert not ss._is_junk_url("h" * ss.MAX_URL_LENGTH)
+    assert ss._is_junk_url("h" * (ss.MAX_URL_LENGTH + 1))
+    assert not ss._is_junk_url("h" + "/" * ss.MAX_URL_SLASHES)
+    assert ss._is_junk_url("h" + "/" * (ss.MAX_URL_SLASHES + 1))
+
+
+def _capture_with_url(tweet_id: str, url: str) -> dict:
+    """A minimal SearchTimeline capture carrying one tweet with one entity URL."""
+    return {"url": "https://x.com/i/api/graphql/abc/SearchTimeline", "body": {
+        "data": {"search_by_raw_query": {"search_timeline": {"timeline": {
+            "instructions": [{"type": "TimelineAddEntries", "entries": [
+                {"content": {"itemContent": {"tweet_results": {"result": {
+                    "rest_id": tweet_id,
+                    "core": {"user_results": {"result": {
+                        "legacy": {"screen_name": "spambot"}}}},
+                    "legacy": {
+                        "id_str": tweet_id,
+                        "full_text": "Ready to meet? click here",
+                        "created_at": "Wed Aug 27 12:00:00 +0000 2026",
+                        "entities": {"urls": [{"url": "https://t.co/z",
+                                               "expanded_url": url}]},
+                    },
+                }}}}},
+            ]}],
+        }}}},
+    }}
+
+
+def test_twitter_drops_tweet_whose_url_is_real_captured_spam():
+    """End-to-end: the junk tweet never becomes a raw_item, so it never reaches
+    the LLM extraction step."""
+    assert parse_twitter_payloads([_capture_with_url("9001", _REAL_SPAM_URL)]) == []
+
+
+def test_twitter_keeps_tweet_with_long_but_legitimate_url():
+    out = parse_twitter_payloads(
+        [_capture_with_url("9002", _REAL_LONGEST_LEGIT_URL)]
+    )
+    assert len(out) == 1
+    assert _REAL_LONGEST_LEGIT_URL in out[0]["urls"]
+
+
+def test_twitter_spam_floor_does_not_affect_the_baseline_fixture():
+    # The floor must be inert on ordinary traffic — the standard fixture still
+    # yields its one link-bearing item.
+    assert len(parse_twitter_payloads([_TWITTER_CAPTURE])) == 1
+
+
+# --------------------------------------------------------------------------- #
 # parse_instagram_payloads
 # --------------------------------------------------------------------------- #
 def test_instagram_parses_media_and_bio_link():

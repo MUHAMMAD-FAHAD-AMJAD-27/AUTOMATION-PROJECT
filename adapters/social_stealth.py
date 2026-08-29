@@ -262,6 +262,33 @@ def _tweet_urls(legacy: dict) -> list[str]:
     return out
 
 
+# Spam floor, calibrated against the 43 distinct URLs in the first REAL capture
+# (x.com/search for "free credits" / "#freecourse" / "student pack promo"):
+#
+#   URL length  min 14 | median  23 | max 137   -> 0 URLs over 300 chars
+#   slash count min  2 | median   3 | max   5   -> 0 URLs over 12 slashes
+#
+# The longest legitimate URL was 137 chars, so a 300-char cap leaves >2x
+# headroom and drew zero false positives on real data. The observed junk was a
+# ~2000-char keyword-stuffed URL whose padding lived in the QUERY STRING
+# ("...?q=Ready/sugar/daddy/..."), which is why the slash count is taken over the
+# whole URL rather than the path: the two thresholds catch stuffing wherever it
+# is parked. Both are deliberately structural — no keyword blocklist, which
+# would need endless maintenance and would misfire on legitimate deals.
+#
+# This runs BEFORE the LLM prefilter, so every drop here is LLM spend avoided;
+# that is the point. It is intentionally a floor and not a classifier: only
+# structurally absurd URLs are rejected, and judging actual offer quality stays
+# the LLM's job.
+MAX_URL_LENGTH = 300
+MAX_URL_SLASHES = 12
+
+
+def _is_junk_url(url: str) -> bool:
+    """True for structurally absurd URLs — keyword-stuffed spam, not real links."""
+    return len(url) > MAX_URL_LENGTH or url.count("/") > MAX_URL_SLASHES
+
+
 def parse_twitter_payloads(captured: list[dict]) -> list[dict]:
     """Extract tweets from captured SearchTimeline/UserTweets JSON as raw_item payloads.
 
@@ -270,7 +297,9 @@ def parse_twitter_payloads(captured: list[dict]) -> list[dict]:
     ``core.user_results...legacy.screen_name``. We accept any node that has a
     ``legacy`` with both ``full_text`` and ``id_str`` and pull URLs from the text
     plus the entity list. Only link-bearing tweets become raw items — a freebie
-    without a destination URL is not actionable downstream."""
+    without a destination URL is not actionable downstream — and a tweet whose
+    links are structurally absurd (see ``_is_junk_url``) is dropped before it can
+    cost an LLM call."""
     seen: set[str] = set()
     out: list[dict] = []
     for capture in captured:
@@ -294,6 +323,9 @@ def parse_twitter_payloads(captured: list[dict]) -> list[dict]:
             urls = extract_urls(full_text, extra=_tweet_urls(legacy))
             if not urls:
                 continue  # no destination link -> not an actionable offer
+            if any(_is_junk_url(u) for u in urls):
+                log.debug("twitter: dropping %s — structurally junk URL", tweet_id)
+                continue
             seen.add(tweet_id)
 
             out.append({
