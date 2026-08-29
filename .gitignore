@@ -17,6 +17,12 @@ sessions/
 *.session
 *.session-journal
 
+# Social-stealth browser identities — live session cookies + fingerprint.
+# NEVER commit: anyone with a *.state.json can impersonate the logged-in account.
+# Covers the default ./identities dir and any IDENTITY_DIR override location.
+identities/
+*.state.json
+
 # Local tooling
 .ruff_cache/
 .mypy_cache/

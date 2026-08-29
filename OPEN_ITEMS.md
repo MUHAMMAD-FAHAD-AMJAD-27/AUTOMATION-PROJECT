@@ -47,6 +47,10 @@ acts next:
   `parse_twitter_payloads` / `parse_instagram_payloads` now turn captures into
   `raw_items`, and `run_twitter` / `run_instagram` wrap capture→parse→persist with
   graceful `_health(ok=False)` degradation.
+- **ACTIVATION IN PROGRESS (owner decision 2026-08-29).** Reversed from dormant — the owner
+  wants this live. Sequence: `.gitignore` prerequisite closed (done, this session) → owner
+  does the one-time manual browser login (pending, owner-only) → validate the parser against
+  the first real capture → only then wire into a scheduler slot.
 - **Not wired into `scheduler.py` — by design.** With no identity bootstrapped it would
   only log a failed browser launch every slot. It stays out of the 27-slot loop until an
   identity exists.
@@ -56,23 +60,20 @@ acts next:
   run headless on the scheduler dyno. A local dry-run also requires `patchright install`
   (Chromium binary) — absent in this environment, which is why the last dry-run degraded
   to a logged launch failure (environment, not code).
-- **Prerequisite before bootstrap — SECURITY (concrete, verified 2026-08-29):** the root
-  `.gitignore` covers `.env`, `sessions/`, `*.session` but **does not cover
-  `*.state.json`**. The identity files hold live session cookies. Add `*.state.json`
-  (and the `identities/` dir) to `.gitignore` **before** creating any state file, or a
-  session cookie set can be committed by accident. This also reconciles the DEPLOYMENT.md
-  §4 checklist line that currently *claims* `.gitignore` covers `*.state.json` — it does
-  not yet.
+- **Prerequisite before bootstrap — SECURITY: CLOSED 2026-08-29.** The root `.gitignore`
+  now covers `identities/` **and** `*.state.json` (committed this session), so a live
+  session-cookie file cannot be committed by accident. This also makes the DEPLOYMENT.md §4
+  checklist line ("`.gitignore` covers `*.state.json`") accurate — it was aspirational before.
 - **Tech debt (carry forward):** the parsers were validated against **constructed
   fixtures** modeled on the documented GraphQL shapes (SearchTimeline / profile
   graphql), **not a real captured payload**. The tree walker is depth-agnostic (walks by
   marker keys, not fixed paths) specifically to survive front-end reshuffles, but the
   first real capture may still need path/marker adjustments. When that first capture
   happens, diff it against the fixtures in `tests/test_social_stealth.py`.
-- **What would unblock it:** (a) add `*.state.json` to `.gitignore`; (b) manually log in
-  once and save `identities/<name>.state.json`; (c) validate the parser against one real
-  capture; (d) only then decide whether to wire `run_twitter` / `run_instagram` into a
-  scheduler slot.
+- **What would unblock it:** (a) ~~add `*.state.json` to `.gitignore`~~ **DONE 2026-08-29**;
+  (b) manually log in once and save `identities/<name>.state.json` (owner-only action —
+  step-by-step provided 2026-08-29); (c) validate the parser against one real capture;
+  (d) only then decide whether to wire `run_twitter` / `run_instagram` into a scheduler slot.
 
 ---
 
@@ -139,7 +140,7 @@ genuinely-open ones are visible:
 
 | Checklist line | Real state |
 |---|---|
-| Secrets in config vars; `.gitignore` covers `.env`, `*.state.json`, `sessions/` | **Partial.** `.env`, `sessions/`, `*.session` covered; **`*.state.json` NOT covered** → see §2.1 prerequisite. |
+| Secrets in config vars; `.gitignore` covers `.env`, `*.state.json`, `sessions/` | **Satisfied (2026-08-29).** `.env`, `sessions/`, `*.session`, **`identities/` + `*.state.json`** all covered. |
 | `DATABASE_URL` server-only; read-only DB role for the dashboard | **Open.** Server-only is satisfied; read-only role is not — see §3.1 tension. |
 | Telegram session account is disposable | **N/A while §1.1 is paused** (no session exists). |
 | Discord webhook treated as a secret | **Satisfied.** Commit `188b874` + `scheduler.py:47` set httpx to WARNING so webhook URLs never hit the log stream. |
