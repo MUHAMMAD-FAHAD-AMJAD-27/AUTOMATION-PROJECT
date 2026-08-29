@@ -356,14 +356,47 @@ def parse_twitter_payloads(captured: list[dict]) -> list[dict]:
     return out
 
 
+def _ig_caption_text(node: dict) -> str:
+    """Caption text across IG web-client shapes.
+
+    Current (2026) ``graphql/query`` responses carry ``caption`` as a dict
+    ``{text, created_at, pk, ...}``. Older documented shapes nested it under
+    ``edge_media_to_caption.edges[0].node.text``. A post with no caption has
+    ``caption: null``. Return "" when there is no text."""
+    cap = node.get("caption")
+    if isinstance(cap, dict) and isinstance(cap.get("text"), str):
+        return cap["text"]
+    if isinstance(cap, str):
+        return cap
+    edges = (node.get("edge_media_to_caption") or {}).get("edges") or []
+    if edges:
+        return (edges[0].get("node") or {}).get("text") or ""
+    return ""
+
+
+# A media node is identified by a permalink id (``code``/``shortcode``) PLUS at
+# least one of these — so a stray ``code`` on some unrelated object cannot be
+# mistaken for a post.
+_IG_MEDIA_MARKERS = (
+    "caption", "edge_media_to_caption", "taken_at", "taken_at_timestamp",
+    "like_count", "edge_liked_by",
+)
+
+
 def parse_instagram_payloads(captured: list[dict], handle: str) -> list[dict]:
     """Extract IG posts from captured profile graphql JSON as raw_item payloads.
 
-    An IG media node carries a ``shortcode`` (permalink id) and its caption text
-    is nested under ``edge_media_to_caption.edges[].node.text``. Bio links live on
-    the user node (``external_url`` / ``bio_links``). Both media captions and the
-    profile bio can carry the real offer URL, so we emit link-bearing media posts
-    and, separately, a single 'bio link' pseudo-item when the profile exposes one."""
+    An IG media node carries a permalink id — ``code`` on the current web client,
+    ``shortcode`` on the older documented shape — and its caption text (see
+    ``_ig_caption_text`` for the shapes). Bio links live on the user node
+    (``external_url`` / ``bio_links``), which the profile *feed* query does not
+    always carry. Both media captions and the profile bio can hold the real offer
+    URL, so we emit link-bearing media posts and, separately, a single 'bio link'
+    pseudo-item when the profile exposes one.
+
+    NB: redirect resolution (bit.ly / tinyurl / wp.me) is NOT done here — the
+    pipeline's URLCanonicalizer follows redirects for every source uniformly, so
+    the parser only needs to surface the URL as it appears in the caption."""
     seen: set[str] = set()
     out: list[dict] = []
 
@@ -391,13 +424,12 @@ def parse_instagram_payloads(captured: list[dict], handle: str) -> list[dict]:
                     })
 
             # --- media post ---
-            shortcode = node.get("shortcode")
-            if not shortcode or shortcode in seen:
+            shortcode = node.get("shortcode") or node.get("code")
+            if not isinstance(shortcode, str) or not shortcode or shortcode in seen:
                 continue
-            caption = ""
-            cap_edges = (node.get("edge_media_to_caption") or {}).get("edges") or []
-            if cap_edges:
-                caption = (cap_edges[0].get("node") or {}).get("text") or ""
+            if not any(m in node for m in _IG_MEDIA_MARKERS):
+                continue  # a `code` on a non-media object — not a post
+            caption = _ig_caption_text(node)
             permalink = f"https://www.instagram.com/p/{shortcode}/"
             urls = extract_urls(caption)
             if not urls:
@@ -405,6 +437,14 @@ def parse_instagram_payloads(captured: list[dict], handle: str) -> list[dict]:
             seen.add(shortcode)
 
             taken = node.get("taken_at_timestamp")
+            if taken is None:
+                taken = node.get("taken_at")
+            likes = node.get("like_count")
+            if likes is None:
+                likes = (node.get("edge_liked_by") or {}).get("count", 0)
+            comments = node.get("comment_count")
+            if comments is None:
+                comments = (node.get("edge_media_to_comment") or {}).get("count", 0)
             out.append({
                 "external_id": f"instagram:{shortcode}",
                 "text": caption,
@@ -415,8 +455,8 @@ def parse_instagram_payloads(captured: list[dict], handle: str) -> list[dict]:
                     if isinstance(taken, (int, float)) else None
                 ),
                 "engagement": {
-                    "likes": (node.get("edge_liked_by") or {}).get("count", 0),
-                    "comments": (node.get("edge_media_to_comment") or {}).get("count", 0),
+                    "likes": likes,
+                    "comments": comments,
                 },
                 "extra": {
                     "platform": "instagram",

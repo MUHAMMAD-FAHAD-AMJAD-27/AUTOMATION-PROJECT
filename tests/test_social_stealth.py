@@ -12,6 +12,8 @@ import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 import adapters.social_stealth as ss
 from adapters.social_stealth import (
     _iter_nodes,
@@ -71,6 +73,47 @@ _INSTAGRAM_CAPTURE = {
         "biography": "Daily dev deals -> https://links.example.com/all",
         "external_url": "https://links.example.com/all",
         "edge_owner_to_timeline_media": {"edges": [
+            # LIVE 2026 web-client shape: `code`, `caption` dict, `taken_at`,
+            # `like_count`/`comment_count`. Validated against real captures
+            # (opportunitydesk, afterschoolafrica) — see OPEN_ITEMS §2.1.
+            {"node": {
+                "code": "Cabc123",
+                "taken_at": 1756296000,
+                "caption": {"pk": "1", "created_at": 1756296000,
+                            "text": "Free Notion Pro for students grab it https://notion.example.com/edu"},
+                "like_count": 210,
+                "comment_count": 12,
+            }},
+            # A post with no caption URL -> dropped.
+            {"node": {
+                "code": "Cdef456",
+                "taken_at": 1756299600,
+                "caption": {"pk": "2", "created_at": 1756299600,
+                            "text": "cute office setup pic"},
+                "like_count": 5,
+                "comment_count": 0,
+            }},
+            # A post whose caption is null -> dropped (no URL, no crash).
+            {"node": {
+                "code": "Cghi789",
+                "taken_at": 1756303200,
+                "caption": None,
+                "like_count": 3,
+                "comment_count": 0,
+            }},
+        ]},
+    }}},
+}
+
+
+# Older documented shape — kept so the parser's back-compat path stays covered.
+_INSTAGRAM_CAPTURE_LEGACY = {
+    "url": "https://www.instagram.com/graphql/query",
+    "body": {"data": {"user": {
+        "username": "devfreebies",
+        "biography": "Daily dev deals -> https://links.example.com/all",
+        "external_url": "https://links.example.com/all",
+        "edge_owner_to_timeline_media": {"edges": [
             {"node": {
                 "shortcode": "Cabc123",
                 "taken_at_timestamp": 1756296000,
@@ -80,7 +123,6 @@ _INSTAGRAM_CAPTURE = {
                 "edge_liked_by": {"count": 210},
                 "edge_media_to_comment": {"count": 12},
             }},
-            # A post with no caption URL -> dropped.
             {"node": {
                 "shortcode": "Cdef456",
                 "taken_at_timestamp": 1756299600,
@@ -330,10 +372,12 @@ def test_twitter_author_not_taken_from_a_mentioned_user():
 # --------------------------------------------------------------------------- #
 # parse_instagram_payloads
 # --------------------------------------------------------------------------- #
-def test_instagram_parses_media_and_bio_link():
-    out = parse_instagram_payloads([_INSTAGRAM_CAPTURE], "devfreebies")
+@pytest.mark.parametrize("capture", [_INSTAGRAM_CAPTURE, _INSTAGRAM_CAPTURE_LEGACY])
+def test_instagram_parses_media_and_bio_link(capture):
+    out = parse_instagram_payloads([capture], "devfreebies")
     ids = {i["external_id"] for i in out}
-    # bio link pseudo-item + the one link-bearing media post; caption-less post dropped
+    # bio link pseudo-item + the one link-bearing media post; caption-less /
+    # null-caption posts dropped
     assert "instagram:bio:devfreebies" in ids
     assert "instagram:Cabc123" in ids
     assert "instagram:Cdef456" not in ids
@@ -342,11 +386,19 @@ def test_instagram_parses_media_and_bio_link():
     assert "https://notion.example.com/edu" in media["urls"]
     assert media["author_handle"] == "instagram:devfreebies"
     assert media["engagement"]["likes"] == 210
+    assert media["engagement"]["comments"] == 12
     assert media["extra"]["kind"] == "media"
+    assert media["extra"]["permalink"] == "https://www.instagram.com/p/Cabc123/"
 
     bio = next(i for i in out if i["external_id"] == "instagram:bio:devfreebies")
     assert "https://links.example.com/all" in bio["urls"]
     assert bio["extra"]["kind"] == "bio_link"
+
+
+def test_instagram_null_caption_does_not_crash():
+    # The live shape can carry `caption: null`; must be dropped, not raised.
+    out = parse_instagram_payloads([_INSTAGRAM_CAPTURE], "devfreebies")
+    assert "instagram:Cghi789" not in {i["external_id"] for i in out}
 
 
 def test_instagram_empty_capture_yields_nothing():
