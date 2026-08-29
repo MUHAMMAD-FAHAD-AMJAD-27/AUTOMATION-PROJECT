@@ -34,7 +34,12 @@ headless fetch uses, so the saved cookies are minted under the fingerprint they
 will later be replayed with.
 
 Env vars (all optional unless noted):
-    PROXY_URL            socks5://user:pass@host:port   (residential, sticky)
+    PROXY_URL            http://user:pass@host:port  — a STATIC residential/ISP
+                         proxy (one fixed IP). Credentials in the URL are split
+                         into Playwright's separate username/password fields by
+                         _proxy_config(); see that function for why embedding
+                         them in `server` does not work, and why an
+                         authenticated proxy must be http/https, never socks5.
     SLACK_ALERT_WEBHOOK  optional alerting
 """
 from __future__ import annotations
@@ -47,6 +52,7 @@ import os
 import random
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from patchright.async_api import async_playwright
 
@@ -67,6 +73,55 @@ DEFAULT_TWITTER_TERMS = ["free credits", "#freecourse", "student pack promo"]
 DEFAULT_INSTAGRAM_HANDLES: list[str] = []  # curated list must be supplied by the operator
 
 
+def _proxy_config(proxy_url: str | None) -> dict[str, str] | None:
+    """Split a proxy URL into Playwright's ``{server, username, password}`` form.
+
+    Chromium — and therefore patchright — will **not** authenticate a proxy from
+    credentials embedded in the server URL (``http://user:pass@host:port``). They
+    are dropped, and the connection either goes out unproxied or dies on a 407.
+    Playwright's own API requires ``server`` to carry only ``scheme://host:port``
+    with the credentials passed as separate ``username`` / ``password`` keys, so
+    the split has to happen here rather than being handed through verbatim.
+
+    Accepting the credentials *inside* ``PROXY_URL`` is deliberate: it keeps the
+    whole proxy secret in one Heroku config var instead of three, and a password
+    can be percent-encoded there (``unquote`` restores it) so characters like
+    ``@`` and ``:`` survive the round trip.
+
+    Returns ``None`` when no proxy is configured, which is what
+    ``new_context(proxy=None)`` expects — so with no proxy set this is inert.
+    """
+    if not proxy_url:
+        return None
+
+    parsed = urlsplit(proxy_url)
+    if not parsed.hostname:
+        # Not URL-shaped (e.g. a bare "host:port"). Hand it to Playwright
+        # untouched rather than silently mangling an operator's literal value.
+        return {"server": proxy_url}
+
+    host = parsed.hostname if parsed.port is None else f"{parsed.hostname}:{parsed.port}"
+    scheme = parsed.scheme or "http"
+    config: dict[str, str] = {"server": f"{scheme}://{host}"}
+
+    if parsed.username:
+        config["username"] = unquote(parsed.username)
+    if parsed.password:
+        config["password"] = unquote(parsed.password)
+
+    if config.get("username") and scheme.startswith("socks"):
+        # Chromium supports SOCKS5 only *without* authentication. An
+        # authenticated SOCKS proxy fails at connect time with an error that
+        # looks nothing like "wrong proxy scheme", so say so loudly here.
+        log.error(
+            "PROXY_URL uses %s with credentials — Chromium cannot authenticate a "
+            "SOCKS proxy. Use an http:// or https:// endpoint from the same "
+            "provider, or IP-whitelist auth with no username/password.",
+            scheme,
+        )
+    return config
+
+
 class StealthIdentity:
     """One persistent browser identity (fingerprint + cookies + proxy)."""
 
@@ -80,7 +135,7 @@ class StealthIdentity:
     def context_options(self) -> dict:
         return {
             "storage_state": str(self.state_path) if self.state_path.exists() else None,
-            "proxy": {"server": self.proxy_url} if self.proxy_url else None,
+            "proxy": _proxy_config(self.proxy_url),
             "viewport": {"width": 1366, "height": 768},
             "locale": "en-US",
             "timezone_id": "America/New_York",

@@ -9,6 +9,7 @@ TODO left this adapter in.
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import adapters.social_stealth as ss
@@ -243,3 +244,87 @@ def test_login_saves_instagram_identity_to_correct_path(tmp_path, monkeypatch):
 
     saved = context.storage_state.call_args.kwargs["path"]
     assert saved.endswith("ig-ro.state.json")
+
+
+# --------------------------------------------------------------------------- #
+# Proxy credential split (_proxy_config)
+# --------------------------------------------------------------------------- #
+# Chromium silently DROPS credentials embedded in the proxy server URL, so
+# `{"server": "http://user:pass@host:port"}` either goes out unproxied or dies on
+# a 407. Playwright requires server = scheme://host:port with username/password
+# as separate keys. These lock that split.
+def test_proxy_config_none_when_unset():
+    """With no proxy configured the whole feature stays inert — new_context()
+    expects proxy=None, not a partially-built dict."""
+    assert ss._proxy_config(None) is None
+    assert ss._proxy_config("") is None
+
+
+def test_proxy_config_splits_credentials_out_of_server():
+    cfg = ss._proxy_config("http://user123:secretpw@geo.iproyal.com:12321")
+    assert cfg == {
+        "server": "http://geo.iproyal.com:12321",   # no creds left in server
+        "username": "user123",
+        "password": "secretpw",
+    }
+    assert "@" not in cfg["server"]
+
+
+def test_proxy_config_percent_decodes_the_password():
+    """A password containing @ or : must be percent-encoded in the env var; the
+    split has to restore the literal value or auth fails."""
+    cfg = ss._proxy_config("http://u:p%40ss%3Aword@1.2.3.4:8080")
+    assert cfg["password"] == "p@ss:word"
+    assert cfg["server"] == "http://1.2.3.4:8080"
+
+
+def test_proxy_config_omits_auth_keys_when_there_are_no_credentials():
+    """IP-whitelisted proxies have no user/pass — passing empty strings would be
+    treated as a real (failing) credential pair."""
+    cfg = ss._proxy_config("http://geo.iproyal.com:12321")
+    assert cfg == {"server": "http://geo.iproyal.com:12321"}
+
+
+def test_proxy_config_defaults_missing_scheme_and_keeps_portless_host():
+    assert ss._proxy_config("//host.example:9000") == {"server": "http://host.example:9000"}
+    assert ss._proxy_config("http://host.example") == {"server": "http://host.example"}
+
+
+def test_proxy_config_passes_through_a_non_url_value_untouched():
+    """A bare host:port isn't URL-shaped (urlsplit finds no hostname). Hand the
+    operator's literal value to Playwright rather than mangling it."""
+    assert ss._proxy_config("geo.iproyal.com:12321") == {"server": "geo.iproyal.com:12321"}
+
+
+def test_proxy_config_logs_error_for_authenticated_socks(caplog):
+    """Chromium supports SOCKS5 only without auth, and the runtime failure looks
+    nothing like a scheme problem — so it has to be called out here."""
+    with caplog.at_level(logging.ERROR):
+        cfg = ss._proxy_config("socks5://user:pass@1.2.3.4:1080")
+    assert cfg["server"] == "socks5://1.2.3.4:1080"
+    assert cfg["username"] == "user"
+    assert "cannot authenticate a" in caplog.text.lower()
+
+
+def test_proxy_config_socks_without_credentials_is_silent(caplog):
+    with caplog.at_level(logging.ERROR):
+        cfg = ss._proxy_config("socks5://1.2.3.4:1080")
+    assert cfg == {"server": "socks5://1.2.3.4:1080"}
+    assert caplog.text == ""
+
+
+def test_context_options_uses_the_split_proxy(monkeypatch, tmp_path):
+    monkeypatch.setattr(ss, "IDENTITY_DIR", tmp_path)
+    monkeypatch.setenv("PROXY_URL", "http://user123:secretpw@geo.iproyal.com:12321")
+    opts = ss.StealthIdentity("twitter-main").context_options
+    assert opts["proxy"] == {
+        "server": "http://geo.iproyal.com:12321",
+        "username": "user123",
+        "password": "secretpw",
+    }
+
+
+def test_context_options_proxy_is_none_without_proxy_url(monkeypatch, tmp_path):
+    monkeypatch.setattr(ss, "IDENTITY_DIR", tmp_path)
+    monkeypatch.delenv("PROXY_URL", raising=False)
+    assert ss.StealthIdentity("twitter-main").context_options["proxy"] is None
