@@ -23,8 +23,15 @@ Hard truths (read before building):
   Use a human-curated mirror/topic list instead (see INGESTION_SPECS.md).
 
 Dependencies:
-    pip install patchright   # drop-in Playwright fork with CDP patches
-    playwright install chromium
+    pip install patchright         # drop-in Playwright fork with CDP patches
+    patchright install chromium    # browser binary (NOT `playwright install`)
+
+One-time identity bootstrap (owner, interactive — cannot run headless):
+    python -m adapters.social_stealth --login twitter     # -> identities/twitter-main.state.json
+    python -m adapters.social_stealth --login instagram   # -> identities/ig-ro.state.json
+The --login flow opens a HEADED browser reusing the exact same fingerprint the
+headless fetch uses, so the saved cookies are minted under the fingerprint they
+will later be replayed with.
 
 Env vars (all optional unless noted):
     PROXY_URL            socks5://user:pass@host:port   (residential, sticky)
@@ -442,6 +449,52 @@ async def run_instagram(handles: list[str] | None = None, dry_run: bool = False)
     return total
 
 
+# --------------------------------------------------------------------------- #
+# One-time identity bootstrap — headed manual login (owner, interactive)
+# --------------------------------------------------------------------------- #
+# platform -> (identity name, login URL). The identity name MUST match the one
+# the headless runner uses (run_twitter -> "twitter-main", run_instagram ->
+# "ig-ro") so the login writes the exact file the fetch later reads.
+LOGIN_TARGETS: dict[str, tuple[str, str]] = {
+    "twitter": ("twitter-main", "https://x.com/login"),
+    "instagram": ("ig-ro", "https://www.instagram.com/accounts/login/"),
+}
+
+
+async def login(platform: str) -> None:
+    """Open a HEADED browser so a human can log in ONCE, then persist the
+    storage_state to ``identities/<name>.state.json``.
+
+    Reuses the identical ``StealthIdentity.context_options`` the headless fetch
+    uses (viewport / locale / timezone / UA + ``PROXY_URL``), so the session
+    cookies are minted under the *same* fingerprint they will later be replayed
+    with. A mismatch here (e.g. bootstrapping via ``patchright codegen``, which
+    uses its own default context) is a common cause of a session that works once
+    and is then challenged on first headless use. Cannot run headless — this is
+    the one interactive step the scheduler dyno can never perform itself."""
+    name, url = LOGIN_TARGETS[platform]
+    identity = StealthIdentity(name)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
+        # Same context_options as SocialFetcher.fetch: storage_state is None
+        # (no file yet), proxy + fingerprint identical to the headless path.
+        context = await browser.new_context(**identity.context_options)
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_PATIENCE)
+            log.info("[%s] a browser window is open at %s", name, url)
+            log.info("[%s] log in by hand; wait until your home feed has fully loaded.", name)
+            await asyncio.to_thread(
+                input,
+                f"\n>>> When you are fully logged in to {platform}, return here and press "
+                f"Enter to save the identity... ",
+            )
+            await identity.save_state(context)
+            log.info("[%s] identity saved -> %s", name, identity.state_path)
+        finally:
+            await browser.close()
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -449,6 +502,8 @@ def main() -> None:
     )
     parser = argparse.ArgumentParser(description="Stealth social adapter (Twitter/X + Instagram)")
     parser.add_argument("--platform", choices=("twitter", "instagram"), required=True)
+    parser.add_argument("--login", action="store_true",
+                        help="one-time: open a HEADED browser to log in by hand and save the identity")
     parser.add_argument("--dry-run", action="store_true", help="print payloads, no DB write")
     parser.add_argument("--term", action="append", default=None,
                         help="twitter search term (repeatable)")
@@ -456,7 +511,9 @@ def main() -> None:
                         help="instagram handle (repeatable)")
     args = parser.parse_args()
 
-    if args.platform == "twitter":
+    if args.login:
+        asyncio.run(login(args.platform))
+    elif args.platform == "twitter":
         asyncio.run(run_twitter(terms=args.term, dry_run=args.dry_run))
     else:
         asyncio.run(run_instagram(handles=args.handle, dry_run=args.dry_run))

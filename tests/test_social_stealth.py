@@ -8,6 +8,10 @@ TODO left this adapter in.
 """
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import adapters.social_stealth as ss
 from adapters.social_stealth import (
     _iter_nodes,
     _parse_iso_or_twitter_date,
@@ -167,3 +171,75 @@ def test_instagram_parses_media_and_bio_link():
 
 def test_instagram_empty_capture_yields_nothing():
     assert parse_instagram_payloads([], "whoever") == []
+
+
+# --------------------------------------------------------------------------- #
+# login() — one-time headed identity bootstrap
+# --------------------------------------------------------------------------- #
+def test_login_targets_map_to_runner_identity_names():
+    # The login identity names MUST match the ones the headless runners construct
+    # (run_twitter -> "twitter-main", run_instagram -> "ig-ro"), or the login
+    # writes a file the fetch never reads.
+    assert ss.LOGIN_TARGETS["twitter"][0] == "twitter-main"
+    assert ss.LOGIN_TARGETS["instagram"][0] == "ig-ro"
+    assert ss.LOGIN_TARGETS["twitter"][1].startswith("https://")
+    assert ss.LOGIN_TARGETS["instagram"][1].startswith("https://")
+
+
+def _mock_playwright_chain():
+    """Build an async_playwright() stand-in whose chain records its calls."""
+    page = AsyncMock()
+    context = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
+    browser = AsyncMock()
+    browser.new_context = AsyncMock(return_value=context)
+    chromium = MagicMock()
+    chromium.launch = AsyncMock(return_value=browser)
+    p_obj = MagicMock()
+    p_obj.chromium = chromium
+    apw_cm = MagicMock()
+    apw_cm.__aenter__ = AsyncMock(return_value=p_obj)
+    apw_cm.__aexit__ = AsyncMock(return_value=False)
+    return apw_cm, chromium, browser, context
+
+
+def test_login_uses_headed_browser_and_reuses_fetch_fingerprint(tmp_path, monkeypatch):
+    monkeypatch.setattr(ss, "IDENTITY_DIR", tmp_path)
+    monkeypatch.delenv("PROXY_URL", raising=False)
+    apw_cm, chromium, browser, context = _mock_playwright_chain()
+
+    with patch.object(ss, "async_playwright", return_value=apw_cm), \
+         patch.object(ss.asyncio, "to_thread", new=AsyncMock(return_value="")):
+        asyncio.run(ss.login("twitter"))
+
+    # Headed, not headless — this is the interactive bootstrap.
+    chromium.launch.assert_awaited_once()
+    assert chromium.launch.call_args.kwargs.get("headless") is False
+
+    # Context built from the SAME fingerprint the headless fetch uses, and with
+    # no storage_state yet (no identity file exists at bootstrap time).
+    ctx_kwargs = browser.new_context.call_args.kwargs
+    assert ctx_kwargs["viewport"] == {"width": 1366, "height": 768}
+    assert ctx_kwargs["timezone_id"] == "America/New_York"
+    assert ctx_kwargs["locale"] == "en-US"
+    assert ctx_kwargs["user_agent"].startswith("Mozilla/5.0")
+    assert ctx_kwargs["storage_state"] is None
+
+    # Identity persisted to identities/twitter-main.state.json.
+    context.storage_state.assert_awaited_once()
+    saved = context.storage_state.call_args.kwargs["path"]
+    assert saved.endswith("twitter-main.state.json")
+    assert str(tmp_path) in saved
+
+
+def test_login_saves_instagram_identity_to_correct_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(ss, "IDENTITY_DIR", tmp_path)
+    monkeypatch.delenv("PROXY_URL", raising=False)
+    apw_cm, _chromium, _browser, context = _mock_playwright_chain()
+
+    with patch.object(ss, "async_playwright", return_value=apw_cm), \
+         patch.object(ss.asyncio, "to_thread", new=AsyncMock(return_value="")):
+        asyncio.run(ss.login("instagram"))
+
+    saved = context.storage_state.call_args.kwargs["path"]
+    assert saved.endswith("ig-ro.state.json")
