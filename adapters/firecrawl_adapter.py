@@ -5,8 +5,10 @@ Uses the Firecrawl SDK (firecrawl-py) for headless JS-rendered extraction.
 
 Pipeline:
   1. Map  — discover all /resources/* slugs via firecrawl.map()
-  2. Filter — keep only pages modified in the last FRESHNESS_HOURS
-             (read from JSON-LD dateModified embedded in each page)
+  2. Dedup — drop URLs already ingested within RESCRAPE_AFTER_DAYS (queried
+             from raw_items); only genuinely new / stale pages survive. This
+             is the credit guard: the paid LLM-extract scrape in step 3 only
+             ever sees unseen URLs, so a re-run of an unchanged catalog is free.
   3. Batch scrape — extract structured deal data via LLM extraction schema
   4. Emit — write NormalizedItem-compatible payloads to upsert_raw_item()
 
@@ -27,11 +29,8 @@ import hashlib
 import json
 import logging
 import os
-import re
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import httpx
 from dotenv import load_dotenv
 
 from crawler.db import connect, record_source_health, upsert_raw_item
@@ -47,7 +46,7 @@ def _health(source_id: int | None, ok: bool, error: str | None = None) -> None:
     with connect() as conn:
         record_source_health(conn, source_id, ok=ok, error=error)
 
-FRESHNESS_HOURS = 48        # only scrape pages modified within this window
+RESCRAPE_AFTER_DAYS = 14    # re-scrape a page at most once per this window
 MAX_URLS_PER_BATCH = 20     # Firecrawl batch_scrape limit per call
 INTER_BATCH_DELAY = 3.0     # seconds between batch calls
 
@@ -101,11 +100,6 @@ EXTRACT_PROMPT = (
     "Set is_offer=false for pages that are purely informational with no actionable deal."
 )
 
-# JSON-LD dateModified extractor
-_DATE_MODIFIED_RE = re.compile(
-    r'"dateModified"\s*:\s*"([^"]+)"', re.IGNORECASE
-)
-
 
 # --------------------------------------------------------------------------- #
 # Firecrawl SDK wrapper (graceful import)
@@ -147,40 +141,49 @@ def _map_site(app, base_url: str, category_filter: str | None) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Step 2 — Freshness filter: skip pages not updated recently
+# Step 2 — Dedup filter: skip URLs already ingested recently
 # --------------------------------------------------------------------------- #
-async def _filter_fresh(
+# Replaces the old JSON-LD `dateModified` freshness check, which failed OPEN:
+# resourify pages carry no matching dateModified, so the "include to be safe"
+# fallback passed all 125 URLs every run and the paid LLM-extract scrape re-ran
+# the whole catalog ~27×/day (the 2026-08 credit blowout). This filter instead
+# fails CLOSED against what we have already stored: a URL is scraped only if its
+# hash is absent from raw_items for this source within RESCRAPE_AFTER_DAYS, so an
+# unchanged catalog costs nothing on subsequent runs and stale pages still get a
+# periodic refresh once they age out of the window.
+def _seen_external_ids(source_id: int, within_days: int) -> set[str]:
+    """external_ids ingested for this source within the last `within_days`."""
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT external_id FROM raw_items
+                WHERE source_id = %s
+                  AND fetched_at > now() - make_interval(days => %s)
+                """,
+                (source_id, within_days),
+            )
+            return {row["external_id"] for row in cur.fetchall()}
+
+
+def _filter_unseen(
     urls: list[str],
-    freshness_hours: int,
+    source_id: int | None,
+    within_days: int,
 ) -> list[str]:
-    """Keep only URLs whose JSON-LD dateModified is within freshness_hours."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=freshness_hours)
-    fresh: list[str] = []
+    """Keep only URLs not already ingested within `within_days`.
 
-    async with httpx.AsyncClient(
-        headers={"User-Agent": "Mozilla/5.0 (compatible; FreebiesBot/1.0)"},
-        follow_redirects=True,
-        timeout=10.0,
-    ) as client:
-        for url in urls:
-            try:
-                resp = await client.get(url)
-                m = _DATE_MODIFIED_RE.search(resp.text)
-                if m:
-                    dt = datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    if dt >= cutoff:
-                        fresh.append(url)
-                else:
-                    # No dateModified — include to be safe
-                    fresh.append(url)
-            except Exception:
-                fresh.append(url)  # include on error, let Firecrawl handle it
-            await asyncio.sleep(0.3)
-
-    log.info("Freshness filter: %d → %d URLs (cutoff: %dh)", len(urls), len(fresh), freshness_hours)
-    return fresh
+    In dry-run there is no source_id to dedup against, so all URLs pass (a
+    dry-run is a manual, rare, read-only inspection — never the scheduled path)."""
+    if source_id is None:
+        return urls
+    seen = _seen_external_ids(source_id, within_days)
+    unseen = [u for u in urls if _url_hash(u) not in seen]
+    log.info(
+        "Dedup filter: %d → %d URLs (%d already seen within %dd)",
+        len(urls), len(unseen), len(urls) - len(unseen), within_days,
+    )
+    return unseen
 
 
 # --------------------------------------------------------------------------- #
@@ -285,7 +288,7 @@ def _ensure_source(source_name: str) -> int:
 async def run_firecrawl(
     sites: list[str] | None = None,
     category_filter: str | None = None,
-    freshness_hours: int = FRESHNESS_HOURS,
+    rescrape_after_days: int = RESCRAPE_AFTER_DAYS,
     dry_run: bool = False,
     limit: int | None = None,
 ) -> int:
@@ -312,15 +315,16 @@ async def run_firecrawl(
         if limit:
             all_urls = all_urls[:limit]
 
-        # 2) Freshness filter
-        fresh_urls = await _filter_fresh(all_urls, freshness_hours)
+        # 2) Dedup filter — drop URLs already ingested within the window so the
+        #    paid extract scrape only ever sees genuinely new / stale pages.
+        fresh_urls = _filter_unseen(all_urls, source_id, rescrape_after_days)
         if not fresh_urls:
-            log.info("No fresh URLs for %s (all older than %dh)", base_url, freshness_hours)
-            _health(source_id, ok=True)  # site reached fine, just nothing fresh
+            log.info("No unseen URLs for %s (all scraped within %dd)", base_url, rescrape_after_days)
+            _health(source_id, ok=True)  # site reached fine, nothing new to scrape
             continue
 
         # 3) Batch scrape
-        log.info("Scraping %d fresh URLs from %s", len(fresh_urls), base_url)
+        log.info("Scraping %d unseen URLs from %s", len(fresh_urls), base_url)
         raw_results = _batch_scrape(app, fresh_urls)
 
         # 4) Write
@@ -362,13 +366,13 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--category", default=None, help="filter by pipeline category name")
     parser.add_argument("--limit", type=int, default=None, help="max URLs to scrape per site")
-    parser.add_argument("--freshness", type=int, default=FRESHNESS_HOURS,
-                        help=f"hours lookback window (default {FRESHNESS_HOURS})")
+    parser.add_argument("--rescrape-after-days", type=int, default=RESCRAPE_AFTER_DAYS,
+                        help=f"re-scrape a page at most once per N days (default {RESCRAPE_AFTER_DAYS})")
     args = parser.parse_args()
 
     asyncio.run(run_firecrawl(
         category_filter=args.category,
-        freshness_hours=args.freshness,
+        rescrape_after_days=args.rescrape_after_days,
         dry_run=args.dry_run,
         limit=args.limit,
     ))

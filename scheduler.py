@@ -138,8 +138,8 @@ def _run_slot(category: str, run_number: int) -> None:
     # 2) Creator mirrors — fresh RSS feeds relevant to category
     _run_creator_mirrors()
 
-    # 3) Firecrawl adapter — resourify.com scrape for this category
-    _run_firecrawl(category)
+    # 3) Firecrawl adapter — resourify.com scrape (once/day, all_deals slot)
+    _run_firecrawl(category, run_number)
 
     # 3b) Dormant + new adapters, each gated to the categories/runs it serves
     #     so no single slot hammers every source (see helper docstrings).
@@ -184,7 +184,17 @@ def _run_creator_mirrors() -> None:
         log.warning("creator_mirrors adapter failed: %s", exc)
 
 
-def _run_firecrawl(category: str) -> None:
+def _run_firecrawl(category: str, run_number: int) -> None:
+    """resourify.com is a slow-changing deal catalog, so scrape it once/day —
+    not every one of the 27 slots. Gated to a single slot (all_deals, run 1);
+    firecrawl's map ignores the category filter (it returns every /resources/
+    URL regardless), so which lane it rides on is cosmetic — the gate just
+    guarantees exactly one run per day. The adapter itself then dedups against
+    already-ingested URLs so even that one run scrapes only genuinely new pages.
+    This replaced an ungated per-slot call that re-scraped all 125 URLs ~27×/day
+    with the paid LLM-extract format (the 2026-08 credit blowout)."""
+    if category != "all_deals" or run_number != 1:
+        return
     try:
         from adapters.firecrawl_adapter import run_firecrawl
         asyncio.run(run_firecrawl(category_filter=category))
