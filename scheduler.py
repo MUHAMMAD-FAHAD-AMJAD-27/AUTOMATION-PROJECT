@@ -148,6 +148,7 @@ def _run_slot(category: str, run_number: int) -> None:
     _run_reddit(category)               # Reddit freebies/deals (coupon slot)
     _run_devto(category)                # dev.to articles (ai_tools slot)
     _run_producthunt(category)          # Product Hunt launches (saas_deal slot)
+    _run_twitter(category, run_number)  # Twitter/X first-hand capture (once/day, all_deals slot)
 
     # 4) OpenRouter — ingest free-tier LLM models (llm_api_drop / ai_tools slots only)
     _run_openrouter(category)
@@ -276,6 +277,32 @@ def _run_producthunt(category: str) -> None:
         asyncio.run(run_producthunt(max_items=ADAPTER_LIMIT_PER_RUN))
     except Exception as exc:
         log.warning("producthunt adapter failed: %s", exc)
+
+
+def _run_twitter(category: str, run_number: int) -> None:
+    """Twitter/X first-hand capture (social_stealth) — logged-in scrape of a
+    single validated identity (twitter-main). Gated to once/day on the all_deals
+    run-1 slot (07:07 UTC), mirroring the firecrawl/github gate.
+
+    Once/day is deliberate account-safety, not a content-freshness judgement: with
+    a single hand-minted identity and no proxy (PROXY_URL declined), one
+    login-bearing session hit per day is the lowest-risk cadence. The adapter
+    self-throttles (6-15s between search terms, headless, one context, no parallel
+    tabs) and degrades to a logged no-op on an auth-wall / expired cookie rather
+    than raising — and this helper additionally swallows any exception — so a bad
+    social run can never abort the slot's pipeline.
+
+    Instagram stays dark (DEFAULT_INSTAGRAM_HANDLES is empty — a separate
+    decision). Twitter's default search terms feed the free-tier / student /
+    coupon lanes; the adapter tags platform=twitter but assigns no pipeline
+    category, so classification happens downstream in the LLM verifier."""
+    if category != "all_deals" or run_number != 1:
+        return
+    try:
+        from adapters.social_stealth import run_twitter
+        asyncio.run(run_twitter())
+    except Exception as exc:
+        log.warning("twitter (social_stealth) adapter failed: %s", exc)
 
 
 async def _run_pipeline(category: str) -> dict:
