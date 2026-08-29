@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS offers (
                         CHECK (category IN ('cloud','llm','hosting','domain','tools','student','course','coupon',
                                             'ai_tools','coding_agents',
                                             'open_source_repo','llm_api_drop','student_pack','saas_deal',
+                                            'notable_repo',
                                             'other')),
     offer_type          TEXT NOT NULL DEFAULT 'other'
                         CHECK (offer_type IN ('credit','grant','vps','domain','license','subscription','code','giveaway','other')),

@@ -59,7 +59,7 @@ class _FakeExtractor:
     async def embed(self, texts):
         return []
 
-    async def extract_batch(self, items):
+    async def extract_batch(self, items, mode="deal"):
         key = items[0][1].canonical  # primary.canonical of the first item
         if self.events is not None:
             self.events.append(("extract", key))
@@ -157,10 +157,10 @@ def test_flag_on_concurrent_all_succeed_ordered(monkeypatch):
     # extraction-completion order they'd come out scrambled. They don't, because
     # the write stage iterates zip(chunks, results) in chunk order.
     class _Staggered(_FakeExtractor):
-        async def extract_batch(self, items):
+        async def extract_batch(self, items, mode="deal"):
             first_id = int(items[0][1].canonical.rsplit("/", 1)[1])
             await asyncio.sleep(0.03 - first_id * 0.004)  # chunk 0 slowest
-            return await super().extract_batch(items)
+            return await super().extract_batch(items, mode=mode)
 
     ext = _Staggered()
     stats = _fresh_stats()

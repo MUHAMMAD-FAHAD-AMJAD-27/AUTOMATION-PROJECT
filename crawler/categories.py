@@ -70,6 +70,10 @@ CATEGORY_DEFS: tuple[CategoryDef, ...] = (
                 "Free open-source projects (GitHub repos) that replace paid tools"),
     CategoryDef("saas_deal", "💼", 0xF59E42,
                 "SaaS lifetime deals, AppSumo-style offers, \"1 year free\" promotions"),
+    CategoryDef("notable_repo", "🌟", 0x2DD4BF,
+                "Genuinely notable / trending open-source repo surfaced for discovery "
+                "(not a deal). Item-4b non-deal lane; kept out of Discord dispatch until "
+                "enabled. Emitted ONLY for items marked extra.is_repo."),
     CategoryDef("other", "✨", 0x64748B,
                 "Anything that doesn't fit above"),
 )

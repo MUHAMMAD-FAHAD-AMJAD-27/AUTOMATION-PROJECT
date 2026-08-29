@@ -17,6 +17,7 @@ export const CATEGORIES = [
   "coding_agents",
   "open_source_repo",
   "saas_deal",
+  "notable_repo",
   "other",
 ] as const;
 export type Category = (typeof CATEGORIES)[number];
@@ -49,6 +50,7 @@ export const CATEGORY_COLORS: Record<string, string> = {
   coding_agents: "#F97316",
   open_source_repo: "#22C55E",
   saas_deal: "#F59E42",
+  notable_repo: "#2DD4BF",
   other: "#64748B",
 };
 
@@ -67,5 +69,6 @@ export const CATEGORY_EMOJIS: Record<string, string> = {
   coding_agents: "⚡",
   open_source_repo: "📦",
   saas_deal: "💼",
+  notable_repo: "🌟",
   other: "✨",
 };

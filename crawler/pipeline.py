@@ -218,24 +218,39 @@ def has_undispatched_offers(conn: psycopg.Connection, channel: str = "discord") 
 
     Cheap by design: a single EXISTS that short-circuits on the first hit, so the
     common "nothing waiting" case costs one index probe per run.
+
+    Item 4b: categories whose dispatch is HELD (notable_repo until its enable flag
+    is flipped — see discord_dispatcher.held_dispatch_categories) are excluded
+    here too. Otherwise a growing pile of ingested-but-held notable_repo offers
+    would keep this gate True on every run, firing the dispatch stage each time
+    only for claim_offers to correctly send nothing. Enforcement of the hold lives
+    in claim_offers; this exclusion just keeps the gate honest.
     """
+    # Lazy import mirrors dispatch_new_offers() — avoids a top-level dependency on
+    # the repo-root dispatcher module from inside the crawler package.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from discord_dispatcher import held_dispatch_categories
+
+    held = list(held_dispatch_categories())
+    hold_filter = "AND o.category <> ALL(%(held)s)" if held else ""
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT EXISTS (
                 SELECT 1
                 FROM offers o
                 WHERE o.verification_status IN ('verified','live')
                   AND o.is_active
+                  {hold_filter}
                   AND NOT EXISTS (
                       SELECT 1 FROM dispatches d
                       WHERE d.offer_id = o.id
-                        AND d.channel  = %s
+                        AND d.channel  = %(channel)s
                         AND d.status   = 'sent'
                   )
             ) AS pending
             """,
-            (channel,),
+            {"channel": channel, "held": held},
         )
         row = cur.fetchone()
     return bool(row and row["pending"])
@@ -414,6 +429,7 @@ async def _process_batch_result(
 async def _extract_chunks_concurrent(
     extractor: LLMExtractor,
     chunks: list[list[tuple[dict, Any, CanonicalURL, Any]]],
+    mode: str = "deal",
 ) -> list:
     """Run each chunk's ``extract_batch`` concurrently, bounded by a semaphore.
 
@@ -425,6 +441,9 @@ async def _extract_chunks_concurrent(
     stage can pair results back with ``zip(chunks, results)`` and dead-letter
     just the failed chunk. Only extraction is concurrent here — the write stage
     the caller runs afterwards stays strictly sequential.
+
+    ``mode`` is forwarded to ``extract_batch`` (Item 4b); all chunks passed here
+    share one mode because the caller partitions survivors before chunking.
     """
     cap = max(1, SchedulerConfig.from_env().max_concurrent_batches)
     sem = asyncio.Semaphore(cap)
@@ -432,7 +451,8 @@ async def _extract_chunks_concurrent(
     async def _one(chunk):
         async with sem:
             return await extractor.extract_batch(
-                [(normalized, primary) for _, normalized, primary, _ in chunk]
+                [(normalized, primary) for _, normalized, primary, _ in chunk],
+                mode=mode,
             )
 
     return await asyncio.gather(
@@ -447,6 +467,7 @@ async def _run_stage_b(
     survivors: list[tuple[dict, Any, CanonicalURL, Any]],
     stats: dict,
     dry_run: bool,
+    mode: str = "deal",
 ) -> None:
     """Batched LLM extraction (BATCH_SIZE items/call) + sequential write.
 
@@ -461,12 +482,17 @@ async def _run_stage_b(
     the shared ``_process_batch_result`` helper, and each chunk keeps its
     ``(chunk, offers)`` pairing, so DB write ordering and dedup semantics are
     identical to the sequential path.
+
+    ``mode`` (Item 4b) picks the extraction prompt: ``"deal"`` (default) is the
+    unchanged deal path; ``"repo"`` routes GitHub-Trending (extra.is_repo) items
+    through the relaxed notable-repo prompt. The caller partitions survivors by
+    is_repo so a chunk is never mixed-mode.
     """
     chunks = [survivors[i: i + BATCH_SIZE]
               for i in range(0, len(survivors), BATCH_SIZE)]
 
     if _distribution_enabled():
-        results = await _extract_chunks_concurrent(extractor, chunks)
+        results = await _extract_chunks_concurrent(extractor, chunks, mode=mode)
         for chunk, offers_or_exc in zip(chunks, results):
             await _process_batch_result(
                 conn, deduplicator, extractor, chunk, offers_or_exc, stats, dry_run
@@ -475,7 +501,8 @@ async def _run_stage_b(
         for chunk in chunks:
             try:
                 offers = await extractor.extract_batch(
-                    [(normalized, primary) for _, normalized, primary, _ in chunk]
+                    [(normalized, primary) for _, normalized, primary, _ in chunk],
+                    mode=mode,
                 )
             except Exception as exc:  # noqa: BLE001 — one bad batch never kills the run
                 offers = exc
@@ -554,7 +581,21 @@ async def _run_ingest_stages(
         # Sequential extract->write when distribution is OFF (default);
         # concurrent extraction (bounded by LLM_MAX_CONCURRENT_BATCHES) with
         # a still-sequential write stage when it is ON. See _run_stage_b.
-        await _run_stage_b(conn, deduplicator, extractor, survivors, stats, dry_run)
+        #
+        # Item 4b: partition survivors by extra.is_repo so GitHub-Trending
+        # repo-discovery items run through the relaxed notable-repo prompt
+        # (mode="repo") while every deal item stays on the unchanged deal path
+        # (mode="deal"). Chunks are never mixed-mode. The near-universal case
+        # (no repo items) is byte-for-byte the previous single call.
+        repo_survivors = [s for s in survivors if s[1].extra.get("is_repo")]
+        deal_survivors = [s for s in survivors if not s[1].extra.get("is_repo")]
+        await _run_stage_b(
+            conn, deduplicator, extractor, deal_survivors, stats, dry_run, mode="deal"
+        )
+        if repo_survivors:
+            await _run_stage_b(
+                conn, deduplicator, extractor, repo_survivors, stats, dry_run, mode="repo"
+            )
 
 
 # --------------------------------------------------------------------------- #

@@ -90,7 +90,38 @@ CATEGORY_WEBHOOK_ENV: dict[str, str] = {
     "coding_agents":    "DISCORD_WEBHOOK_CODING_AGENTS",
     "cloud":            "DISCORD_WEBHOOK_CLOUD",
     "coupon":           "DISCORD_WEBHOOK_COUPON",
+    # Item 4b: notable_repo has its own channel env var already wired here so the
+    # operator can drop in NOTABLE_REPO_WEBHOOK_URL now; dispatch stays HELD (see
+    # HELD_DISPATCH_FLAGS below) until the enable flag is flipped, so this webhook
+    # sits unused until then and never falls back to the default deal channel.
+    "notable_repo":     "NOTABLE_REPO_WEBHOOK_URL",
 }
+
+# Item 4b — HELD dispatch lane. Offers in these categories are fully ingested,
+# classified, and stored, but withheld from Discord dispatch until their enable
+# flag is explicitly truthy. notable_repo (GitHub-Trending discovery) collects
+# silently for operator review; flip NOTABLE_REPO_DISPATCH_ENABLED=1 to release
+# it (optionally after pointing NOTABLE_REPO_WEBHOOK_URL at a dedicated channel).
+# Enforced in claim_offers() below and mirrored by pipeline.has_undispatched_offers
+# so the dispatch gate doesn't fire on content that can't yet be sent.
+HELD_DISPATCH_FLAGS: dict[str, str] = {
+    "notable_repo": "NOTABLE_REPO_DISPATCH_ENABLED",
+}
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def held_dispatch_categories() -> tuple[str, ...]:
+    """Categories currently withheld from dispatch (their enable-flag is off).
+
+    Empty once every held category's flag is truthy, at which point dispatch
+    behaves exactly as it did before Item 4b for those categories.
+    """
+    return tuple(
+        cat for cat, flag in HELD_DISPATCH_FLAGS.items() if not _env_truthy(flag)
+    )
 
 
 def resolve_webhook(category: str, default_url: str) -> str:
@@ -289,6 +320,19 @@ def claim_offers(
         "max_reclaim": MAX_RECLAIM_ATTEMPTS,
     }
 
+    # Item 4b — HELD dispatch: exclude categories whose enable flag is still off
+    # (notable_repo until NOTABLE_REPO_DISPATCH_ENABLED is truthy). Applied to
+    # every offer-selecting query below (dry-run preview, ceiling scan, INSERT,
+    # and the claim UPDATE's inner subquery) so held offers are never inserted
+    # into dispatches, never claimed, and never sent — even when an operator
+    # passes --category notable_repo explicitly. Once the flag flips, held is
+    # empty and hold_filter is "" — dispatch is byte-for-byte the prior behavior.
+    held = held_dispatch_categories()
+    hold_filter = ""
+    if held:
+        hold_filter = "AND o.category <> ALL(%(held_categories)s)"
+        params["held_categories"] = list(held)
+
     # DRY-RUN: preview ONLY — must not mutate the dispatches table.
     # Previously run_batch() called claim_offers() unconditionally and only
     # skipped the *webhook send* under dry_run, so a "preview" still ran the
@@ -317,6 +361,7 @@ def claim_offers(
                   AND o.is_active
                   AND (d.id IS NULL OR d.status <> 'sent')
                   {cat_filter}
+                  {hold_filter}
                 ORDER BY COALESCE(d.created_at, 'infinity'::timestamptz) ASC,
                          o.first_seen ASC
                 LIMIT %(limit)s
@@ -340,6 +385,7 @@ def claim_offers(
               AND d.status = 'failed'
               AND d.attempts >= %(max_reclaim)s
               {cat_filter}
+              {hold_filter}
             """,
             params,
         )
@@ -378,6 +424,7 @@ def claim_offers(
                   WHERE d.offer_id = o.id AND d.channel = %(channel)s
               )
               {cat_filter}
+              {hold_filter}
             ORDER BY o.first_seen ASC
             LIMIT %(limit)s
             ON CONFLICT (offer_id, channel) DO NOTHING
@@ -409,6 +456,7 @@ def claim_offers(
                          AND o.is_active
                          AND d2.status <> 'sent'
                          {cat_filter}
+                         {hold_filter}
                        ORDER BY d2.created_at
                        LIMIT %(limit)s
                    )

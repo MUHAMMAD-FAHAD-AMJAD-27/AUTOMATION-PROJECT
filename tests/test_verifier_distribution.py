@@ -51,7 +51,7 @@ def test_flag_off_scheduler_not_built_and_fixed_order(monkeypatch):
 
     order: list[str] = []
 
-    async def fake_fixed(self, provider, content, n):
+    async def fake_fixed(self, provider, content, n, mode="deal"):
         order.append(provider.base_url)
         return [None] * n  # success on the first provider tried
 
@@ -78,7 +78,7 @@ def test_flag_on_picks_non_primary_first(monkeypatch):
 
     order: list[str] = []
 
-    async def fake_metered(self, provider, content, n):
+    async def fake_metered(self, provider, content, n, mode="deal"):
         order.append(provider.base_url)
         return [None] * n, None, 200
 
@@ -100,7 +100,7 @@ def test_flag_on_pick_none_falls_back_to_fixed_order(monkeypatch):
 
     order: list[str] = []
 
-    async def fake_metered(self, provider, content, n):
+    async def fake_metered(self, provider, content, n, mode="deal"):
         order.append(provider.base_url)
         return [None] * n, None, 200
 

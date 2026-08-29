@@ -110,7 +110,9 @@ def test_has_undispatched_offers_treats_only_sent_as_done():
     assert "d.status = 'sent'" in sql
     assert "o.verification_status IN ('verified','live')" in sql
     assert "o.is_active" in sql
-    assert _params_for(conn, "SELECT EXISTS") == ("discord",)
+    # Named params now (Item 4b added the held-category exclusion alongside the
+    # channel filter). The channel is still what the gate keys on.
+    assert _params_for(conn, "SELECT EXISTS")["channel"] == "discord"
 
 
 # --------------------------------------------------------------------------- #
@@ -333,7 +335,7 @@ def test_pipeline_deadletters_title_dupes_as_dup_title(monkeypatch):
             embedded.append(texts)
             return []
 
-        async def extract_batch(self, items):
+        async def extract_batch(self, items, mode="deal"):
             return [SimpleNamespace(title="Gemini Pro free for students",
                                     description="", url="https://ex/99",
                                     confidence=0.9, category="student")]
@@ -373,7 +375,7 @@ def test_pipeline_title_gate_writes_nothing_in_dry_run(monkeypatch):
         async def embed(self, texts):
             return []
 
-        async def extract_batch(self, items):
+        async def extract_batch(self, items, mode="deal"):
             return [SimpleNamespace(title="t", description="", url="https://ex/99",
                                     confidence=0.9, category="student")]
 
