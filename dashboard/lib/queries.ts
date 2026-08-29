@@ -61,10 +61,31 @@ export async function getOverviewStats(): Promise<OverviewStats> {
       `SELECT category, COUNT(*)::int AS count FROM offers
        WHERE is_active GROUP BY category ORDER BY count DESC, category`
     ),
-    query<{ day: Date; count: number }>(
-      `SELECT date_trunc('day', first_seen)::date AS day, COUNT(*)::int AS count
-       FROM offers WHERE first_seen > now() - interval '7 days'
-       GROUP BY 1 ORDER BY 1`
+    // GROUP BY alone returns a row only for days that HAVE offers, and the chart
+    // gives every returned row an equal share of the width — so a week with two
+    // active days drew two half-width bars and silently claimed to be a full
+    // week. generate_series pins the shape to exactly 7 ordered rows and the
+    // LEFT JOIN fills the quiet days with 0.
+    //
+    // Days are bucketed in UTC (`AT TIME ZONE 'UTC'` turns the timestamptz into
+    // a UTC wall clock) so the boundaries do not move with the server's session
+    // timezone, and `day` comes back as text rather than a DATE: node-pg parses
+    // DATE into a Date at LOCAL midnight, so the old `.toISOString()` shifted
+    // every label back a day for this machine's UTC+5 offset.
+    query<{ day: string; count: number }>(
+      `WITH days AS (
+         SELECT generate_series(
+           date_trunc('day', now() AT TIME ZONE 'UTC') - interval '6 days',
+           date_trunc('day', now() AT TIME ZONE 'UTC'),
+           interval '1 day'
+         ) AS day
+       )
+       SELECT to_char(d.day, 'YYYY-MM-DD') AS day, COUNT(o.id)::int AS count
+       FROM days d
+       LEFT JOIN offers o
+         ON date_trunc('day', o.first_seen AT TIME ZONE 'UTC') = d.day
+       GROUP BY d.day
+       ORDER BY d.day`
     ),
   ]);
 
@@ -89,10 +110,7 @@ export async function getOverviewStats(): Promise<OverviewStats> {
       category: r.category,
       count: r.count,
     })),
-    last7Days: (week.ok ? week.rows : []).map((r) => ({
-      day: r.day.toISOString().slice(0, 10),
-      count: r.count,
-    })),
+    last7Days: week.ok ? week.rows.map((r) => ({ day: r.day, count: r.count })) : [],
     errors,
   };
 }

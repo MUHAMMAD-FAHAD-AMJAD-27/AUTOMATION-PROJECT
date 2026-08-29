@@ -45,7 +45,10 @@ function WeekBars({ days }: { days: { day: string; count: number }[] }) {
             className={`w-full rounded-t ${d.count > 0 ? "bg-accent/80" : "bg-raised"}`}
             style={{ height: `${Math.max(3, (d.count / max) * 100)}%` }}
           />
-          <span className="text-[10px] text-muted">{labels[(new Date(d.day).getDay() + 6) % 7]}</span>
+          {/* getUTCDay, not getDay: `day` is a bare YYYY-MM-DD, which Date parses
+              as UTC midnight, so a local reading would name the previous weekday
+              for any machine at a negative UTC offset. */}
+          <span className="text-[10px] text-muted">{labels[(new Date(d.day).getUTCDay() + 6) % 7]}</span>
         </div>
       ))}
     </div>
