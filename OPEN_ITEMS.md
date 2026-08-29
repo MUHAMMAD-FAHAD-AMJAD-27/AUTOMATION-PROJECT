@@ -54,12 +54,15 @@ acts next:
 - **Not wired into `scheduler.py` — by design.** With no identity bootstrapped it would
   only log a failed browser launch every slot. It stays out of the 27-slot loop until an
   identity exists.
-- **Blocker (concrete):** needs a hand-logged-in browser identity
-  (`identities/*.state.json` — Patchright storage_state with cookies/fingerprint). Same
-  blocker *class* as Telegram Tier 2: a manual, interactive, per-account step that cannot
-  run headless on the scheduler dyno. A local dry-run also requires `patchright install`
-  (Chromium binary) — absent in this environment, which is why the last dry-run degraded
-  to a logged launch failure (environment, not code).
+- **Blocker (concrete):** ~~needs a hand-logged-in browser identity~~ **RESOLVED 2026-08-29 —
+  both identities exist and are verified real.** `identities/twitter-main.state.json`
+  (5004 B, `auth_token` httpOnly len 40 + `ct0` len 160) and `identities/ig-ro.state.json`
+  (4154 B, 12 cookies including `sessionid` httpOnly len 77 + `ds_user_id` len 11). The IG
+  bootstrap needed two attempts: Instagram's `/auth_platform/no_challenge/` device
+  verification does **not** push the phone approval to the waiting desktop tab, so the tab
+  must be **reloaded** after approving. `patchright install chromium` is also required
+  (build 1234) — the earlier "degraded to a logged launch failure" was that missing binary,
+  not code.
 - **Proxy (`PROXY_URL`): DECLINED 2026-08-29 — do not revisit as pending.** No paid
   services will be used for this project; the IPRoyal static-residential plan is cancelled
   on **budget** grounds, not technical ones. Direct login from the owner's home connection
@@ -74,16 +77,42 @@ acts next:
   now covers `identities/` **and** `*.state.json` (committed this session), so a live
   session-cookie file cannot be committed by accident. This also makes the DEPLOYMENT.md §4
   checklist line ("`.gitignore` covers `*.state.json`") accurate — it was aspirational before.
-- **Tech debt (carry forward):** the parsers were validated against **constructed
-  fixtures** modeled on the documented GraphQL shapes (SearchTimeline / profile
-  graphql), **not a real captured payload**. The tree walker is depth-agnostic (walks by
-  marker keys, not fixed paths) specifically to survive front-end reshuffles, but the
-  first real capture may still need path/marker adjustments. When that first capture
-  happens, diff it against the fixtures in `tests/test_social_stealth.py`.
+- **Tech debt — X half CLOSED 2026-08-29, Instagram half still open.** The parsers were
+  originally validated against **constructed fixtures** modeled on the documented GraphQL
+  shapes, not a real payload. That is now resolved for X: `parse_twitter_payloads` was run
+  against three live captures from `x.com/search?q=%23freecourse&f=live` (20 tweet nodes,
+  19 parsed items). The depth-agnostic walker needed **no** path changes for tweet
+  extraction, but the real capture exposed two defects the fixtures could not:
+  - **Author extraction was 100% broken** (20/20 items → `twitter:unknown`). X moved
+    `screen_name` off the user result's `legacy` object into a sibling `core`; the live
+    user result has no `legacy` key at all. Fixed in `f93988b` — any nested node under the
+    tweet's own `core` is now accepted, so both shapes work. Re-verified live: 20/20
+    authors resolved, 0 unknown.
+  - **A ~2000-char keyword-stuffed spam URL** would have reached the LLM prefilter and
+    extraction. Fixed in `d26e3d8` with a measured structural floor (`MAX_URL_LENGTH=300`,
+    `MAX_URL_SLASHES=12`); across the 43 real URLs, length maxed at 137 and slashes at 5,
+    so zero false positives and >2x headroom.
+  **Instagram remains fixture-only** — no real capture is possible until handles are
+  supplied (see the blocker below), so `parse_instagram_payloads` is still unvalidated
+  against live data. When the first IG capture happens, diff it against the fixtures in
+  `tests/test_social_stealth.py`.
+- **Silent-logged-out-save defect: CLOSED 2026-08-29 (`26345bb`).** `login()` used to write
+  `storage_state` unconditionally, so the first IG bootstrap saved a 1643-byte identity
+  holding only 6 pre-auth cookies after the operator pressed Enter on a challenge screen.
+  `LOGIN_TARGETS` now carries the auth cookie per platform (`auth_token` / `sessionid`) and
+  `login()` refuses to save without it, naming the cookie and telling the operator to
+  approve on the other device and **reload** before pressing Enter.
+- **Instagram handles: BLOCKED ON OWNER INPUT.** `DEFAULT_INSTAGRAM_HANDLES` at
+  `adapters/social_stealth.py:73` is deliberately empty, and `run_instagram` logs
+  "no handles configured — nothing to do" and returns 0. Nothing about Instagram can be
+  validated until a curated list is supplied. Asked 2026-08-29; do not guess handles.
+
 - **What would unblock it:** (a) ~~add `*.state.json` to `.gitignore`~~ **DONE 2026-08-29**;
-  (b) manually log in once and save `identities/<name>.state.json` (owner-only action —
-  step-by-step provided 2026-08-29); (c) validate the parser against one real capture;
-  (d) only then decide whether to wire `run_twitter` / `run_instagram` into a scheduler slot.
+  (b) ~~manually log in once and save `identities/<name>.state.json`~~ **DONE 2026-08-29 —
+  both platforms, verified by cookie inventory**; (c) ~~validate the parser against one real
+  capture~~ **DONE for X** (`f93988b`, `d26e3d8`) / **BLOCKED for Instagram** on the handle
+  list; (d) only then decide whether to wire `run_twitter` / `run_instagram` into a
+  scheduler slot — **still requires separate explicit owner approval, not granted.**
 
 ---
 
