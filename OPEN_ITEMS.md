@@ -92,10 +92,31 @@ acts next:
     extraction. Fixed in `d26e3d8` with a measured structural floor (`MAX_URL_LENGTH=300`,
     `MAX_URL_SLASHES=12`); across the 43 real URLs, length maxed at 137 and slashes at 5,
     so zero false positives and >2x headroom.
-  **Instagram remains fixture-only** — no real capture is possible until handles are
-  supplied (see the blocker below), so `parse_instagram_payloads` is still unvalidated
-  against live data. When the first IG capture happens, diff it against the fixtures in
-  `tests/test_social_stealth.py`.
+  **Instagram half CLOSED 2026-08-29 (`cc5f687`).** The live
+  `instagram.com/graphql/query` media node had drifted off the documented
+  profile-feed shape exactly as X had: it uses `code` (not `shortcode`), a
+  `caption` **dict** with `.text` (nullable) (not `edge_media_to_caption`),
+  `taken_at` (not `taken_at_timestamp`), and `like_count`/`comment_count` (not
+  `edge_liked_by`/`edge_media_to_comment`). Against the old keys the parser matched
+  **0 link-bearing items on every handle**. `parse_instagram_payloads` now accepts
+  both shapes (id `code|shortcode`; caption dict/str/legacy-edges with a `null`
+  guard; `taken_at|taken_at_timestamp`; `like_count|edge_liked_by` +
+  `comment_count|edge_media_to_comment`), gating a media node on an id **plus** a
+  media marker so a stray `code` can't be misread as a post. Fixtures updated to
+  the live shape with the legacy shape retained under a parametrized back-compat
+  test; full suite 172 passed. Validated live (dry-run, no DB write) across all six
+  handles: **81 link-bearing items** — opportunitydesk 20, opportunitiesforyouth
+  23, opportunitiesforafricans 24, afterschoolafrica 10, deeplearningai 4, **mlhacks
+  0**. URL quality: 99 URLs, max length 122 / max 5 slashes (structural floor
+  300/12, >2x headroom, 0 flagged). ~67/99 URLs are tinyurl/wp.me/opd.to/bit.ly
+  shorteners → confirms central redirect resolution is load-bearing for this source
+  (parser adds none by design). **Two honest limitations on record:** (1) mlhacks
+  yielded 0 — its captions carry no inline URL and the profile *feed* GraphQL query
+  does **not** carry the user `external_url` node, so **bio-link extraction never
+  fires from these captures** (0 `bio_link` items across all six handles); Group B
+  accounts that keep links only in bio will be low-yield until a profile-header
+  query is captured. (2) deeplearningai's 4 came from inline `DeepLearning.AI`
+  mentions, not a bio link.
 - **Silent-logged-out-save defect: CLOSED 2026-08-29 (`26345bb`).** `login()` used to write
   `storage_state` unconditionally, so the first IG bootstrap saved a 1643-byte identity
   holding only 6 pre-auth cookies after the operator pressed Enter on a challenge screen.
@@ -110,13 +131,18 @@ acts next:
   are global scholarship/grant aggregators (dev-tool relevance is a minority slice) and three
   of the four hide destinations behind bit.ly/tinyurl/wp.me shorteners, so redirect-following
   matters. A one-off dry-run capture is authorized; **still not wired into `scheduler.py`.**
+  **UPDATE 2026-08-29:** the authorized dry-run ran (see the Instagram-half tech-debt entry
+  above, `cc5f687`) — 81 items across five handles, shorteners confirmed dominant (~67/99).
+  Redirect-following is handled centrally by `URLCanonicalizer` at pipeline Stage A, so no
+  per-parser fix was needed. **Still not wired into `scheduler.py` — separate approval required.**
 
 - **What would unblock it:** (a) ~~add `*.state.json` to `.gitignore`~~ **DONE 2026-08-29**;
   (b) ~~manually log in once and save `identities/<name>.state.json`~~ **DONE 2026-08-29 —
   both platforms, verified by cookie inventory**; (c) ~~validate the parser against one real
-  capture~~ **DONE for X** (`f93988b`, `d26e3d8`) / **BLOCKED for Instagram** on the handle
-  list; (d) only then decide whether to wire `run_twitter` / `run_instagram` into a
-  scheduler slot — **still requires separate explicit owner approval, not granted.**
+  capture~~ **DONE for both** — X (`f93988b`, `d26e3d8`) and Instagram (`cc5f687`, 81 live
+  items across five of six handles); (d) only then decide whether to wire `run_twitter` /
+  `run_instagram` into a scheduler slot — **still requires separate explicit owner approval,
+  not granted.**
 
 ---
 
