@@ -60,6 +60,16 @@ acts next:
   run headless on the scheduler dyno. A local dry-run also requires `patchright install`
   (Chromium binary) — absent in this environment, which is why the last dry-run degraded
   to a logged launch failure (environment, not code).
+- **Proxy (`PROXY_URL`): DECLINED 2026-08-29 — do not revisit as pending.** No paid
+  services will be used for this project; the IPRoyal static-residential plan is cancelled
+  on **budget** grounds, not technical ones. Direct login from the owner's home connection
+  is accepted instead. Accepted tradeoff: with no shared egress IP between the login and the
+  Heroku fetch, X/Instagram may occasionally force a re-login; the remedy is re-running the
+  manual `--login` step. No functionality is lost — `PROXY_URL` is optional throughout
+  (`_proxy_config` returns `None` when unset → `new_context(proxy=None)`, Playwright's
+  default). The fixed fingerprint (UA / viewport / locale / timezone, shared by `login()`
+  and `SocialFetcher.fetch` via `StealthIdentity.context_options`) remains the **only**
+  consistency measure, by decision — no compensating code was added.
 - **Prerequisite before bootstrap — SECURITY: CLOSED 2026-08-29.** The root `.gitignore`
   now covers `identities/` **and** `*.state.json` (committed this session), so a live
   session-cookie file cannot be committed by accident. This also makes the DEPLOYMENT.md §4

@@ -88,7 +88,7 @@ LLM_FALLBACK_1_* / LLM_FALLBACK_2_*         <- optional provider fallback chain
 DISCORD_WEBHOOK_URL   <- your webhook (plus optional per-category DISCORD_WEBHOOK_<CATEGORY>)
 TG_API_ID / TG_API_HASH / TG_PHONE / TG_PASSWORD   <- Telegram only; blank = adapter skipped
 FIRECRAWL_API_KEY     <- required by the firecrawl adapter
-PROXY_URL             <- residential proxy (social adapters; optional at start)
+PROXY_URL             <- DECLINED (no paid services); leave unset — social adapters run direct
 GITHUB_TOKEN          <- free PAT (no scopes); raises GitHub API limit to 5 000 req/hr
 DASHBOARD_API_KEY     <- Phase 4
 ```
