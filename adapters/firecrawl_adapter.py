@@ -1,10 +1,15 @@
 """
-Firecrawl adapter — resourify.com + deal hub deep extraction
-=============================================================
+Firecrawl adapter — multi deal-hub deep extraction
+====================================================
 Uses the Firecrawl SDK (firecrawl-py) for headless JS-rendered extraction.
+Covers a list of deal hubs (TARGET_SITES): resourify.com, aicredits.dev,
+dealify.com — each mapped, deduped, and scraped independently against its own
+`firecrawl:<host>` source row.
 
-Pipeline:
-  1. Map  — discover all /resources/* slugs via firecrawl.map()
+Pipeline (per site):
+  1. Map  — discover all individual-offer slugs (URLs containing the site's
+             path_fragment, e.g. /resources/, /submissions/, /products/) via
+             firecrawl.map()
   2. Dedup — drop URLs already ingested within RESCRAPE_AFTER_DAYS (queried
              from raw_items); only genuinely new / stale pages survive. This
              is the credit guard: the paid LLM-extract scrape in step 3 only
@@ -29,6 +34,7 @@ import hashlib
 import json
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any
 
 from dotenv import load_dotenv
@@ -50,9 +56,30 @@ RESCRAPE_AFTER_DAYS = 14    # re-scrape a page at most once per this window
 MAX_URLS_PER_BATCH = 20     # Firecrawl batch_scrape limit per call
 INTER_BATCH_DELAY = 3.0     # seconds between batch calls
 
-# Sites to cover — add more deal hubs here as needed
-TARGET_SITES: list[str] = [
-    "https://resourify.com",
+
+@dataclass(frozen=True)
+class SiteConfig:
+    """A deal-hub to map + scrape. ``path_fragment`` restricts the map to that
+    site's individual deal/offer pages (everything else — category indexes,
+    blog, auto-generated compare pages — is dropped before the paid scrape).
+    ``handle`` is the author_handle stamped on every offer from the site."""
+    base_url: str
+    path_fragment: str
+    handle: str
+
+
+# Sites to cover — add more deal hubs here as needed. Each is mapped + deduped +
+# scraped independently (its own `firecrawl:<host>` source row), and all ride the
+# single once/day all_deals-run-1 slot the scheduler gates firecrawl to.
+TARGET_SITES: list[SiteConfig] = [
+    # resourify.com — mixed discounts / credits / lifetime deals; /resources/<slug>.
+    SiteConfig("https://resourify.com", "/resources/", "resourify.com"),
+    # aicredits.dev — free AI API / cloud / GPU / student credits; /submissions/<id>-<slug>.
+    #   New signal class (credits, not discounts), clean structure, ~195 pages.
+    SiteConfig("https://aicredits.dev", "/submissions/", "aicredits.dev"),
+    # dealify.com — curated SaaS lifetime deals (Shopify); /products/<slug>.
+    #   path_fragment drops /collections indexes so only product pages are scraped.
+    SiteConfig("https://dealify.com", "/products/", "dealify.com"),
 ]
 
 # Category path fragments on resourify.com
@@ -125,18 +152,19 @@ def _get_client():
 # --------------------------------------------------------------------------- #
 # Step 1 — Map: discover all resource slugs
 # --------------------------------------------------------------------------- #
-def _map_site(app, base_url: str, category_filter: str | None) -> list[str]:
-    """Return all /resources/* URLs from the site map."""
-    log.info("Mapping %s ...", base_url)
+def _map_site(app, site: SiteConfig, category_filter: str | None) -> list[str]:
+    """Return all individual-offer URLs (those containing site.path_fragment)."""
+    log.info("Mapping %s ...", site.base_url)
     try:
-        result = app.map_url(base_url, include_subdomains=False)
+        result = app.map_url(site.base_url, include_subdomains=False)
         all_urls: list[str] = result.links or []
     except Exception as exc:
-        log.warning("firecrawl.map failed for %s: %s", base_url, exc)
+        log.warning("firecrawl.map failed for %s: %s", site.base_url, exc)
         return []
 
-    resource_urls = [u for u in all_urls if "/resources/" in u]
-    log.info("  %d resource URLs discovered", len(resource_urls))
+    resource_urls = [u for u in all_urls if site.path_fragment in u]
+    log.info("  %d offer URLs discovered (fragment %s)",
+             len(resource_urls), site.path_fragment)
     return resource_urls
 
 
@@ -229,7 +257,7 @@ def _url_hash(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:20]
 
 
-def _result_to_payload(scraped_url: str, extract: dict) -> dict | None:
+def _result_to_payload(scraped_url: str, extract: dict, handle: str) -> dict | None:
     """Convert a Firecrawl extract result to a upsert_raw_item payload."""
     if not extract.get("is_offer", False):
         return None
@@ -246,7 +274,7 @@ def _result_to_payload(scraped_url: str, extract: dict) -> dict | None:
         "text": f"{title}\n{extract.get('description') or ''}\n"
                 + "\n".join(f"{i+1}. {s}" for i, s in enumerate(claiming_steps)),
         "urls": [direct_url, scraped_url] if direct_url != scraped_url else [scraped_url],
-        "author_handle": "resourify.com",
+        "author_handle": handle,
         "published_at": None,
         "engagement": {},
         "extra": {
@@ -286,7 +314,7 @@ def _ensure_source(source_name: str) -> int:
 # Main runner
 # --------------------------------------------------------------------------- #
 async def run_firecrawl(
-    sites: list[str] | None = None,
+    sites: list[SiteConfig] | None = None,
     category_filter: str | None = None,
     rescrape_after_days: int = RESCRAPE_AFTER_DAYS,
     dry_run: bool = False,
@@ -301,15 +329,17 @@ async def run_firecrawl(
         log.error("%s", exc)
         return 0
 
-    for base_url in sites:
-        source_name = f"firecrawl:{base_url.rstrip('/').split('/')[-1]}"
+    for site in sites:
+        # source_name preserves the existing `firecrawl:<host>` row so each site's
+        # dedup history is scoped to itself (resourify keeps firecrawl:resourify.com).
+        source_name = f"firecrawl:{site.handle}"
         # Resolve source_id up front so a failed map/scrape is still recorded on the source.
         source_id = None if dry_run else _ensure_source(source_name)
 
         # 1) Map
-        all_urls = _map_site(app, base_url, category_filter)
+        all_urls = _map_site(app, site, category_filter)
         if not all_urls:
-            _health(source_id, ok=False, error=f"map returned no URLs: {base_url}")
+            _health(source_id, ok=False, error=f"map returned no URLs: {site.base_url}")
             continue
 
         if limit:
@@ -319,12 +349,12 @@ async def run_firecrawl(
         #    paid extract scrape only ever sees genuinely new / stale pages.
         fresh_urls = _filter_unseen(all_urls, source_id, rescrape_after_days)
         if not fresh_urls:
-            log.info("No unseen URLs for %s (all scraped within %dd)", base_url, rescrape_after_days)
+            log.info("No unseen URLs for %s (all scraped within %dd)", site.base_url, rescrape_after_days)
             _health(source_id, ok=True)  # site reached fine, nothing new to scrape
             continue
 
         # 3) Batch scrape
-        log.info("Scraping %d unseen URLs from %s", len(fresh_urls), base_url)
+        log.info("Scraping %d unseen URLs from %s", len(fresh_urls), site.base_url)
         raw_results = _batch_scrape(app, fresh_urls)
 
         # 4) Write
@@ -334,7 +364,7 @@ async def run_firecrawl(
             if not extract:
                 continue
 
-            payload = _result_to_payload(scraped_url, extract)
+            payload = _result_to_payload(scraped_url, extract, site.handle)
             if not payload:
                 continue
 
