@@ -1,8 +1,8 @@
 import { Suspense } from "react";
 import Link from "next/link";
-import { Activity, Inbox, Send, Tags } from "lucide-react";
+import { Activity, AlertTriangle, Inbox, Send, Tags } from "lucide-react";
 import { getOverviewStats } from "@/lib/queries";
-import { StatCard, StatCardSkeleton } from "@/components/stat-card";
+import { StatCard } from "@/components/stat-card";
 import { Panel, PanelEmpty, PanelError, PanelSkeleton } from "@/components/panel";
 import { StatusBadge } from "@/components/badges";
 import { timeAgo } from "@/lib/format";
@@ -62,48 +62,76 @@ function runStatsSummary(stats: unknown): string {
 
 export default async function OverviewPage() {
   const stats = await getOverviewStats();
+  const failures = Object.values(stats.errors).filter(Boolean) as string[];
 
   const kpis = (
     <div data-od-id="kpi-row" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <StatCard
         label="Active offers"
-        value={String(stats.activeOffers)}
+        value={stats.activeOffers === null ? null : String(stats.activeOffers)}
         hint="verified or live, not expired"
         icon={<Tags size={15} strokeWidth={1.8} aria-hidden />}
         iconClass="text-accent"
+        error={stats.errors.activeOffers}
       />
       <StatCard
         label="Pending queue"
-        value={String(stats.pendingQueue)}
+        value={stats.pendingQueue === null ? null : String(stats.pendingQueue)}
         hint="raw items awaiting next run"
         icon={<Inbox size={15} strokeWidth={1.8} aria-hidden />}
         iconClass="text-warn"
+        error={stats.errors.pendingQueue}
       />
       <StatCard
         label="Total dispatches"
-        value={String(stats.totalDispatches)}
+        value={stats.totalDispatches === null ? null : String(stats.totalDispatches)}
         hint="sent to Discord channels"
         icon={<Send size={15} strokeWidth={1.8} aria-hidden />}
         iconClass="text-success"
+        error={stats.errors.totalDispatches}
       />
       <StatCard
         label="Last pipeline run"
-        value={stats.lastRun ? stats.lastRun.status : "never"}
+        value={stats.errors.lastRun ? null : stats.lastRun ? stats.lastRun.status : "never"}
         hint={stats.lastRun?.startedAt ? `${timeAgo(stats.lastRun.startedAt)} · ${runStatsSummary(stats.lastRun.stats)}` : "run ./run.py pipeline to start"}
         icon={<Activity size={15} strokeWidth={1.8} aria-hidden />}
         iconClass={stats.lastRun?.status === "success" ? "text-success" : "text-muted"}
+        error={stats.errors.lastRun}
       />
     </div>
   );
 
   return (
     <div className="flex flex-col gap-6" data-od-id="overview">
+      {/* A dead database used to render as a healthy-looking screen of zeros.
+          This banner makes "the dashboard cannot see the database" impossible to
+          mistake for "there is nothing happening". */}
+      {failures.length > 0 && (
+        <div
+          role="alert"
+          data-od-id="db-error-banner"
+          className="flex items-start gap-2.5 rounded-xl border border-danger/30 bg-danger/5 p-4 text-sm"
+        >
+          <AlertTriangle size={16} strokeWidth={1.8} className="mt-0.5 shrink-0 text-danger" aria-hidden />
+          <div className="min-w-0">
+            <p className="font-medium text-danger">
+              {failures.length === Object.keys(stats.errors).length && failures.length >= 6
+                ? "Database unreachable — nothing on this page is live data."
+                : `${failures.length} of 6 sections failed to load.`}
+            </p>
+            <p className="mt-1 break-words text-xs text-muted">{failures[0]}</p>
+          </div>
+        </div>
+      )}
+
       {kpis}
 
       <div data-od-id="charts-row" className="grid gap-4 lg:grid-cols-5">
         <Panel title="Offers discovered · last 7 days" className="lg:col-span-3">
           <Suspense fallback={<PanelSkeleton rows={4} />}>
-            {stats.last7Days.length === 0 ? (
+            {stats.errors.last7Days ? (
+              <PanelError message={stats.errors.last7Days} />
+            ) : stats.last7Days.every((d) => d.count === 0) ? (
               <PanelEmpty
                 title="No offers recorded yet"
                 description="Once the pipeline processes raw items, discovery history will appear here."
@@ -116,7 +144,9 @@ export default async function OverviewPage() {
 
         <Panel title="Active by category" className="lg:col-span-2">
           <Suspense fallback={<PanelSkeleton rows={5} />}>
-            {stats.categoryCounts.length === 0 ? (
+            {stats.errors.categoryCounts ? (
+              <PanelError message={stats.errors.categoryCounts} />
+            ) : stats.categoryCounts.length === 0 ? (
               <PanelEmpty
                 title="No active offers"
                 description="Categories populate as offers are verified."
@@ -141,7 +171,9 @@ export default async function OverviewPage() {
           </Link>
         }
       >
-        {stats.lastRun ? (
+        {stats.errors.lastRun ? (
+          <PanelError message={stats.errors.lastRun} />
+        ) : stats.lastRun ? (
           <dl className="grid gap-3 sm:grid-cols-4">
             <div>
               <dt className="kbd-hint">Status</dt>

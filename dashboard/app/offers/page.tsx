@@ -18,7 +18,7 @@ export default async function OffersPage({
   const status = single(searchParams.status) ?? "all";
   const availability = (single(searchParams.availability) ?? "active") as "active" | "expired" | "all";
 
-  const rows = await getOffers({ q, category, status, availability, limit: 200 });
+  const { rows, error } = await getOffers({ q, category, status, availability, limit: 200 });
 
   return (
     <div className="flex flex-col gap-4" data-od-id="offers-feed">
@@ -96,8 +96,13 @@ export default async function OffersPage({
         )}
       </form>
 
-      <Panel title={`Results · ${rows.length}`}>
-        {rows.length === 0 ? (
+      <Panel title={error ? "Results · unavailable" : `Results · ${rows.length}`}>
+        {error ? (
+          /* Without this branch an unreadable database was indistinguishable from
+             "no offers match these filters" — the operator would loosen filters
+             forever against a table they cannot actually read. */
+          <PanelError message={error} />
+        ) : rows.length === 0 ? (
           <PanelEmpty
             title="No offers match these filters"
             description={

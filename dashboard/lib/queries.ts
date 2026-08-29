@@ -13,13 +13,31 @@ export type VerificationStatus = (typeof VERIFICATION_STATUSES)[number];
 // --------------------------------------------------------------------------- //
 // Overview
 // --------------------------------------------------------------------------- //
+/**
+ * A count that is `null` means "we could not read it", NOT "it is zero".
+ *
+ * Every helper in this file used to collapse a failed query into `0` / `[]`, so
+ * an unreachable database rendered as a confident, wrong "0 active offers · 0
+ * pending · 0 dispatches · last run: never" — the dashboard's single most
+ * dangerous failure mode, because the operator reads it as "quiet" rather than
+ * "blind". `errors` carries the per-section message so the UI can say which part
+ * failed and why instead of inventing a healthy-looking zero.
+ */
 export type OverviewStats = {
-  activeOffers: number;
-  pendingQueue: number;
-  totalDispatches: number;
+  activeOffers: number | null;
+  pendingQueue: number | null;
+  totalDispatches: number | null;
   lastRun: { status: string; startedAt: string | null; finishedAt: string | null; stats: unknown } | null;
   categoryCounts: { category: string; count: number }[];
   last7Days: { day: string; count: number }[];
+  errors: {
+    activeOffers?: string;
+    pendingQueue?: string;
+    totalDispatches?: string;
+    lastRun?: string;
+    categoryCounts?: string;
+    last7Days?: string;
+  };
 };
 
 export async function getOverviewStats(): Promise<OverviewStats> {
@@ -50,10 +68,18 @@ export async function getOverviewStats(): Promise<OverviewStats> {
     ),
   ]);
 
+  const errors: OverviewStats["errors"] = {};
+  if (!offers.ok) errors.activeOffers = offers.error;
+  if (!queue.ok) errors.pendingQueue = queue.error;
+  if (!dispatched.ok) errors.totalDispatches = dispatched.error;
+  if (!run.ok) errors.lastRun = run.error;
+  if (!cats.ok) errors.categoryCounts = cats.error;
+  if (!week.ok) errors.last7Days = week.error;
+
   return {
-    activeOffers: offers.ok ? offers.rows[0]?.count ?? 0 : 0,
-    pendingQueue: queue.ok ? queue.rows[0]?.count ?? 0 : 0,
-    totalDispatches: dispatched.ok ? dispatched.rows[0]?.count ?? 0 : 0,
+    activeOffers: offers.ok ? offers.rows[0]?.count ?? 0 : null,
+    pendingQueue: queue.ok ? queue.rows[0]?.count ?? 0 : null,
+    totalDispatches: dispatched.ok ? dispatched.rows[0]?.count ?? 0 : null,
     lastRun: run.ok
       ? run.rows[0]
         ? { status: run.rows[0].status, startedAt: run.rows[0].started_at?.toISOString() ?? null, finishedAt: run.rows[0].finished_at?.toISOString() ?? null, stats: run.rows[0].stats }
@@ -67,6 +93,7 @@ export async function getOverviewStats(): Promise<OverviewStats> {
       day: r.day.toISOString().slice(0, 10),
       count: r.count,
     })),
+    errors,
   };
 }
 
@@ -97,7 +124,9 @@ export type OfferRow = {
   source_name: string | null;
 };
 
-export async function getOffers(filters: OfferFilters = {}): Promise<OfferRow[]> {
+export async function getOffers(
+  filters: OfferFilters = {}
+): Promise<{ rows: OfferRow[]; error: string | null }> {
   const clauses: string[] = [];
   const params: unknown[] = [];
 
@@ -136,7 +165,11 @@ export async function getOffers(filters: OfferFilters = {}): Promise<OfferRow[]>
     LIMIT $${params.length}
   `;
   const result = await query<OfferRow>(sql, params);
-  return result.ok ? result.rows : [];
+  // A failure must not look like "no offers match these filters" — the caller
+  // needs to be able to tell an empty result set from an unreadable one.
+  return result.ok
+    ? { rows: result.rows, error: null }
+    : { rows: [], error: result.error };
 }
 
 // --------------------------------------------------------------------------- //
@@ -165,6 +198,12 @@ export async function getSources(): Promise<{
   cursors: CursorRow[];
   discovered: DiscoveredRow[];
   recentRuns: { flow_key: string; status: string; started_at: string | null }[];
+  errors: {
+    sources?: string;
+    cursors?: string;
+    discovered?: string;
+    recentRuns?: string;
+  };
 }> {
   const [sources, cursors, discovered, runs] = await Promise.all([
     query<SourceRow>(
@@ -186,6 +225,12 @@ export async function getSources(): Promise<{
     ),
   ]);
 
+  const errors: Awaited<ReturnType<typeof getSources>>["errors"] = {};
+  if (!sources.ok) errors.sources = sources.error;
+  if (!cursors.ok) errors.cursors = cursors.error;
+  if (!discovered.ok) errors.discovered = discovered.error;
+  if (!runs.ok) errors.recentRuns = runs.error;
+
   return {
     sources: sources.ok ? sources.rows : [],
     cursors: cursors.ok ? cursors.rows : [],
@@ -195,6 +240,7 @@ export async function getSources(): Promise<{
       status: r.status,
       started_at: r.started_at.toISOString(),
     })),
+    errors,
   };
 }
 

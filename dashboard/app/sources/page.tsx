@@ -11,8 +11,10 @@ export default async function SourcesPage() {
 
   return (
     <div className="flex flex-col gap-4" data-od-id="sources-monitor">
-      <Panel title="Adapters" action={<span className="text-xs text-muted">{data.sources.length} configured</span>}>
-        {data.sources.length === 0 ? (
+      <Panel title="Adapters" action={<span className="text-xs text-muted">{data.errors.sources ? "unavailable" : `${data.sources.length} configured`}</span>}>
+        {data.errors.sources ? (
+          <PanelError message={data.errors.sources} />
+        ) : data.sources.length === 0 ? (
           <PanelEmpty
             title="No sources configured"
             description="Sources are seeded by the pipeline adapters on first run."
@@ -24,15 +26,25 @@ export default async function SourcesPage() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel title="Sync watermarks">
-          <CursorsTable cursors={data.cursors} />
+          {data.errors.cursors ? (
+            <PanelError message={data.errors.cursors} />
+          ) : (
+            <CursorsTable cursors={data.cursors} />
+          )}
         </Panel>
         <Panel title="Discovered channels">
-          <DiscoveredSummary discovered={data.discovered} />
+          {data.errors.discovered ? (
+            <PanelError message={data.errors.discovered} />
+          ) : (
+            <DiscoveredSummary discovered={data.discovered} />
+          )}
         </Panel>
       </div>
 
       <Panel title="Recent pipeline runs">
-        {data.recentRuns.length === 0 ? (
+        {data.errors.recentRuns ? (
+          <PanelError message={data.errors.recentRuns} />
+        ) : data.recentRuns.length === 0 ? (
           <PanelEmpty
             title="No runs recorded"
             description="Run: python run.py pipeline — each invocation writes a row here."
