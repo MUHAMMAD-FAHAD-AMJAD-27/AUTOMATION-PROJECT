@@ -144,6 +144,7 @@ def _run_slot(category: str, run_number: int) -> None:
     # 3b) Dormant + new adapters, each gated to the categories/runs it serves
     #     so no single slot hammers every source (see helper docstrings).
     _run_github(category, run_number)   # curated mega-lists (once/day, OSS slot)
+    _run_github_trending(category, run_number)  # trending-new repos (once/day, OSS slot)
     _run_hn(category)                   # Hacker News (llm_api_drop slot)
     _run_reddit(category)               # Reddit freebies/deals (coupon slot)
     _run_devto(category)                # dev.to articles (ai_tools slot)
@@ -233,6 +234,30 @@ def _run_github(category: str, run_number: int) -> None:
         ))
     except Exception as exc:
         log.warning("github adapter failed: %s", exc)
+
+
+def _run_github_trending(category: str, run_number: int) -> None:
+    """GitHub Trending discovery (Search API, created-window + star floor).
+
+    Gated to once/day on the OSS lane run 1 (slot 3, 02:40 UTC) — trending repos
+    are a slow-moving discovery feed, not per-slot news, and the Search API's
+    30 req/min (authed) budget wants a bounded cadence. Distinct from _run_github:
+    that harvests *external* links inside curated mega-lists and drops github.com
+    repo links; this surfaces the repos themselves.
+
+    DEPLOY COUPLING: everything this writes carries extra.is_repo=True and is NOT
+    a free-tier deal, so the current deal-tuned verifier rejects all of it
+    (no_deal_signal). Do NOT deploy this wiring until the Item-4b non-deal verifier
+    lane lands, or every trending repo dead-letters. Held here behind the standing
+    no-deploy gate; safe to keep committed because it only fires under APScheduler
+    in production, never in tests."""
+    if category != "open_source_repo" or run_number != 1:
+        return
+    try:
+        from adapters.github_trending_adapter import run_github_trending
+        asyncio.run(run_github_trending())
+    except Exception as exc:
+        log.warning("github_trending adapter failed: %s", exc)
 
 
 def _run_hn(category: str) -> None:
