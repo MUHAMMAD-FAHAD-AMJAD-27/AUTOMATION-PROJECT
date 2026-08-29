@@ -225,6 +225,56 @@ acts next:
   and tested. Residual follow-ups (identity bootstrap, real-payload validation, `.gitignore`
   gap) are tracked as the open item **§2.1** — the *feature* is done, the *activation* is not.
 
+### 4.4 Firecrawl credit blowout — full-catalog re-scrape every slot
+- **INCIDENT (2026-08-29).** The Firecrawl dashboard showed **20,961 credits consumed in 7
+  days** (near-zero for weeks prior), concentrated in the last 1–2 days, driving the account
+  to **−1 credit**. This is preserved as a worked incident so the failure mode is not repeated.
+- **Root cause (three compounding defects, all in `adapters/firecrawl_adapter.py` + its call
+  site):**
+  1. **Ungated per-slot call.** `scheduler.py` invoked `_run_firecrawl(category)` on **every one
+     of the 27 slots** (~every 53 min, ~27×/day), unlike github/openrouter which gate to one
+     slot. Firecrawl's `map` ignores the category filter, so all 27 runs scraped the same site.
+  2. **Fail-open freshness filter.** `_filter_fresh` kept only pages whose JSON-LD
+     `dateModified` was within 48h, but resourify pages carry no matching `dateModified` and the
+     fallback was *"include to be safe"* (+ include-on-error). It logged `Freshness filter:
+     125 → 125` every run — it filtered nothing.
+  3. **Paid extract format, no dedup.** Each run scraped all 125 URLs with `formats=["extract"]`
+     (LLM extraction, billed well above a plain scrape), re-reading the same unchanged catalog.
+- **Timing proof it was NOT the v51 deploy (`8a81926`):** `firecrawl_adapter.py` was unchanged
+  since the 08-26 baseline `754b447` (only a log-wording tweak `220696e` on 08-28) and is
+  **absent from the v50→v51 diff** (`4c37a8ea..8a81926`, which touched pipeline/verifier/
+  dashboard/dispatcher/tests). The spike aligns with Firecrawl first *executing in production*
+  ~08-28 (config vars set v46/v47, first firecrawl-containing deploy v48/v49 on 08-28 ~10:41).
+  Credits hit zero ~08:56 UTC on 08-29, ~1h **before** the 09:56 v51 restart — the deploy was
+  downstream of the exhaustion, not its cause. No `/crawl` (recursive), no retry-storm.
+- **No suspicious doc / hardcoded key in the repo** — a whole-repo grep found only the
+  legitimate `FIRECRAWL_API_KEY=fc-...` placeholder in the adapter's own error string. The
+  "firecrawl skill/onboarding guide with a hardcoded key" seen in a separate browser-Claude
+  chat is **not** present here and was not acted on.
+- **Emergency pause (v52, 2026-08-29):** `heroku config:unset FIRECRAWL_API_KEY`. Verified on
+  the next slot (11:33 UTC) — the adapter logged `FIRECRAWL_API_KEY not set` and made **zero**
+  API calls (no `Mapping ...` line), vs the 10:40 slot which still called `map_url`.
+- **Durable fix — commit `93e10bf` (deployed 2026-08-29, see below):**
+  1. **Frequency gate.** `_run_firecrawl(category, run_number)` runs on exactly **one slot/day**
+     (`all_deals`, run 1), mirroring the github/openrouter gating idiom.
+  2. **URL-diff dedup.** `_filter_fresh` replaced by `_filter_unseen`, which drops URLs already
+     in `raw_items` for this source within **`RESCRAPE_AFTER_DAYS = 14`**. Fails *closed*
+     against stored state instead of *open* against page metadata.
+  3. **Extract cost control** falls out of (2): the paid `extract` format lives only in
+     `_batch_scrape`, which now only receives the unseen set; already-seen pages never re-extract.
+  Hermetic tests added in `tests/test_firecrawl_adapter.py` (gate fires once/day, dedup
+  drop/pass, dry-run skip, query scoping); full suite **178 passed**.
+- **Before → after (page-scrapes/day):** **~3,375 → ~12–15 (>99% cut).** Cold start scrapes 125
+  once; days 2–14 scrape ~0 (unchanged catalog); steady state ~9/day refresh (125÷14) + ~3/day
+  non-offer pages (pages with `is_offer=false` write no `raw_item`, so they re-scrape daily —
+  quantified, negligible) + any new slugs. The relative cut holds regardless of the exact
+  per-page credit rate because both multipliers (27× frequency, full-catalog-every-time) are gone.
+- **Deploy + re-enable (2026-08-29):** commit `93e10bf` pushed to `origin/main` and deployed via
+  the Heroku dashboard "Deploy Branch"; `FIRECRAWL_API_KEY` re-set afterward. **Owner adds credits
+  only after deploy is confirmed** — the daily gated run resumes real scrapes once both the key and
+  a balance exist. Standing lesson: any new paid adapter must be gated + deduped **before** it
+  first runs in production, and use `heroku releases -n N` (never `releases:info`) when inspecting.
+
 ---
 
 ## Appendix — DEPLOYMENT.md §4 security-checklist status (evidence, 2026-08-29)
