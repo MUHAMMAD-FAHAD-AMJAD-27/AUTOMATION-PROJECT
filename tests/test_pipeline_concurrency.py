@@ -38,6 +38,9 @@ class _FakeDedup:
     def check(self, url):
         return SimpleNamespace(is_dup=False)
 
+    def check_title_hash(self, title, category):
+        return SimpleNamespace(is_dup=False)
+
     def check_semantic(self, emb):
         return SimpleNamespace(is_dup=False)
 
@@ -77,7 +80,7 @@ class _FakeExtractor:
             return [None] * len(items)
         return [
             SimpleNamespace(title=primary.canonical, description="",
-                            url=primary.final, confidence=0.5)
+                            url=primary.final, confidence=0.5, category="other")
             for _, primary in items
         ]
 

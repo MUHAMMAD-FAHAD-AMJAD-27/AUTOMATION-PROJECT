@@ -363,6 +363,18 @@ async def _process_batch_result(
                     mark_raw_item_attempt(conn, row["id"], "dup:url", permanent=True)
                 continue
 
+            # Same real-world deal re-published under a different URL: identical
+            # title, same category, inside the dedup recency window. Runs BEFORE
+            # embed() so a known repost never costs an embedding call — and it
+            # catches the case cosine provably missed (five publishers writing up
+            # one deal, each with its own article description).
+            dup = deduplicator.check_title_hash(offer.title, offer.category)
+            if dup.is_dup:
+                stats["dup"] += 1
+                if not dry_run:
+                    mark_raw_item_attempt(conn, row["id"], "dup:title", permanent=True)
+                continue
+
             embedding = None
             embeds = await extractor.embed([f"{offer.title}\n{offer.description or ''}"])
             if embeds:

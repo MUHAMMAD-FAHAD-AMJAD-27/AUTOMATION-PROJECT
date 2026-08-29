@@ -937,7 +937,7 @@ class DupCheckResult:
     is_dup: bool
     existing_offer_id: int | None = None
     similarity: float = 0.0
-    basis: str = ""       # url_hash | semantic | ""
+    basis: str = ""       # url_hash | title_hash | semantic | ""
 
 
 def sha256_hex(text: str) -> str:
@@ -954,7 +954,20 @@ def cosine(a: list[float], b: list[float]) -> float:
 
 
 class Deduplicator:
-    """Exact URL-hash + semantic (cosine) dedup against Postgres fingerprints."""
+    """Exact URL-hash + scoped title-hash + semantic (cosine) dedup against
+    Postgres fingerprints.
+
+    Three gates, cheapest first:
+      1. ``check_url_hash``   — byte-identical canonical URL. Catches the same
+         page re-ingested from the same or another source.
+      2. ``check_title_hash`` — identical title *within the same category and
+         recency window*. Catches one real-world deal written up by several
+         publishers, each under its own URL (gate 1 can't see those, and their
+         differing article descriptions can drag the embedding under
+         ``semantic_threshold`` so gate 3 misses them too).
+      3. ``check_semantic``   — cosine over the stored title+description
+         embedding, for rewordings that share neither URL nor exact title.
+    """
 
     def __init__(self, conn: psycopg.Connection, semantic_threshold: float = 0.92,
                  recent_days: int = 90, embed_dim: int = 384) -> None:
@@ -988,6 +1001,51 @@ class Deduplicator:
             return DupCheckResult(True, row["offer_id"], 1.0, "url_hash")
         return DupCheckResult(False)
 
+    # -- exact title, scoped to category + recency -----------------------------
+    def check_title_hash(self, title: str, category: str | None) -> DupCheckResult:
+        """Exact-title dedup, scoped to the SAME category inside ``recent_days``.
+
+        Closes the observed "same deal, different publisher URL" leak: one deal
+        (e.g. a free year of an AI tier for students) gets written up by five
+        outlets, so every copy has a distinct ``canonical_url`` and gate 1 lets
+        them all through; their descriptions come from five different articles,
+        which pulled the title+description embedding under the 0.92 cosine
+        threshold, so gate 3 let them through too. Result: four near-identical
+        posts in one Discord channel.
+
+        Deliberately **scoped, not global**. An unscoped exact-title match would
+        merge genuinely distinct offers that happen to share a generic title
+        ("Free Domain", "Student Discount") across different categories or many
+        months apart. Requiring the same ``category`` *and* a hit inside the
+        ``recent_days`` window makes a match mean "this deal, again, now" rather
+        than "these two strings are equal".
+
+        ``title_hash`` is ``sha256_hex(title.lower())`` — the exact expression
+        ``pipeline.write_offer`` persists, so lookups line up with stored rows.
+        A missing ``category`` disables the gate rather than matching broadly.
+        """
+        if not title or not category:
+            return DupCheckResult(False)
+        self._ensure_conn()
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT f.offer_id
+                FROM offer_fingerprints f
+                JOIN offers o ON o.id = f.offer_id
+                WHERE f.title_hash = %s
+                  AND o.category = %s
+                  AND o.first_seen > now() - %s::interval
+                ORDER BY o.first_seen ASC
+                LIMIT 1
+                """,
+                (sha256_hex(title.lower()), category, f"{self.recent_days} days"),
+            )
+            row = cur.fetchone()
+        if row:
+            return DupCheckResult(True, row["offer_id"], 1.0, "title_hash")
+        return DupCheckResult(False)
+
     # -- semantic ---------------------------------------------------------------
     def check_semantic(self, embedding: list[float]) -> DupCheckResult:
         if not embedding:
@@ -1015,10 +1073,26 @@ class Deduplicator:
             return DupCheckResult(True, best_id, round(best_sim, 4), "semantic")
         return DupCheckResult(False, similarity=round(best_sim, 4))
 
-    def check(self, canonical_url: str, embedding: list[float] | None = None) -> DupCheckResult:
+    def check(
+        self,
+        canonical_url: str,
+        embedding: list[float] | None = None,
+        title: str | None = None,
+        category: str | None = None,
+    ) -> DupCheckResult:
+        """Run the gates cheapest-first, returning on the first hit.
+
+        ``title``/``category`` are optional so existing call sites that only have
+        a URL at hand keep working unchanged; when both are supplied the scoped
+        title gate runs between the URL and semantic gates.
+        """
         result = self.check_url_hash(canonical_url)
         if result.is_dup:
             return result
+        if title and category:
+            result = self.check_title_hash(title, category)
+            if result.is_dup:
+                return result
         if embedding:
             return self.check_semantic(embedding)
         return DupCheckResult(False)

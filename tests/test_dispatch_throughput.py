@@ -1,4 +1,4 @@
-"""Dispatch-throughput fixes (Decision 3a).
+"""Dispatch-throughput (Decision 3a) + scoped title-hash dedup (Decision 3b).
 
 Hermetic: no Postgres, no network, no LLM. A fake connection records the SQL
 each function issues, so the ordering guarantees these fixes depend on are
@@ -12,6 +12,8 @@ What is locked here:
   * ``stats["dispatched"]`` reaches ``runs.stats`` (it used to be dropped)
   * the claim INSERT and the dry-run preview both order oldest-first, so a burst
     of new arrivals cannot re-bury older offers
+  * the title-hash gate only matches same-category hits inside recent_days, runs
+    before the embedding call, and dead-letters as a distinct ``dup:title``
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from unittest.mock import AsyncMock
 
 import crawler.pipeline as pipeline
 import discord_dispatcher
+from crawler.verifier import Deduplicator, DupCheckResult, sha256_hex
 
 
 class _FakeCursor:
@@ -223,3 +226,167 @@ def test_dry_run_preview_orders_oldest_first_and_stays_read_only():
     assert not any(w in s for s, _ in conn.executed for w in ("INSERT", "UPDATE"))
     assert conn.rollbacks == 1 and conn.commits == 0
 
+
+# --------------------------------------------------------------------------- #
+# 3b-1  the scoped title-hash gate
+# --------------------------------------------------------------------------- #
+def _dedup(conn) -> Deduplicator:
+    return Deduplicator(conn, recent_days=90)
+
+
+def test_title_hash_gate_is_scoped_to_category_and_recency():
+    conn = _FakeConn(fetchone_result={"offer_id": 57})
+    res = _dedup(conn).check_title_hash("Gemini Pro free for students", "student")
+    assert res == DupCheckResult(True, 57, 1.0, "title_hash")
+    sql = _one_sql(conn, "f.title_hash")
+    assert "o.category = %s" in sql                      # same-category only
+    assert "o.first_seen > now() - %s::interval" in sql   # inside the window
+    assert "ORDER BY o.first_seen ASC" in sql             # blame the ORIGINAL
+    params = _params_for(conn, "f.title_hash")
+    assert params == (
+        sha256_hex("gemini pro free for students"),       # lowercased, as stored
+        "student",
+        "90 days",
+    )
+
+
+def test_title_hash_uses_the_same_expression_write_offer_persists():
+    """If the lookup hashed the raw title, it could never match a stored row."""
+    conn = _FakeConn(fetchone_result=None)
+    _dedup(conn).check_title_hash("MiXeD Case Title", "tools")
+    assert _params_for(conn, "f.title_hash")[0] == sha256_hex("mixed case title")
+
+
+def test_title_hash_gate_returns_no_dup_when_nothing_matches():
+    conn = _FakeConn(fetchone_result=None)
+    assert _dedup(conn).check_title_hash("Brand new deal", "tools").is_dup is False
+
+
+def test_title_hash_gate_disabled_without_a_category():
+    """No category means no safe scope — the gate declines instead of matching
+    broadly, and issues no query at all."""
+    conn = _FakeConn(fetchone_result={"offer_id": 1})
+    assert _dedup(conn).check_title_hash("Some title", None).is_dup is False
+    assert _dedup(conn).check_title_hash("Some title", "").is_dup is False
+    assert _dedup(conn).check_title_hash("", "student").is_dup is False
+    assert conn.executed == []
+
+
+def test_check_short_circuits_before_semantic_on_a_title_hit():
+    """Ordering guarantee: a title hit must not cost an embedding comparison."""
+    conn = _FakeConn(fetchone_result={"offer_id": 57})
+    dd = _dedup(conn)
+    calls: list[str] = []
+    dd.check_url_hash = lambda url: (calls.append("url"), DupCheckResult(False))[-1]
+    dd.check_title_hash = lambda t, c: (calls.append("title"),
+                                        DupCheckResult(True, 57, 1.0, "title_hash"))[-1]
+    dd.check_semantic = lambda emb: (calls.append("semantic"), DupCheckResult(True))[-1]
+
+    res = dd.check("https://ex/new", embedding=[0.1] * 8,
+                   title="Gemini Pro free for students", category="student")
+    assert res.basis == "title_hash"
+    assert calls == ["url", "title"]       # semantic never ran
+
+
+def test_check_falls_through_to_semantic_when_title_is_clean():
+    conn = _FakeConn(fetchone_result=None)
+    dd = _dedup(conn)
+    dd.check_url_hash = lambda url: DupCheckResult(False)
+    dd.check_title_hash = lambda t, c: DupCheckResult(False)
+    dd.check_semantic = lambda emb: DupCheckResult(True, 9, 0.95, "semantic")
+    res = dd.check("https://ex/new", embedding=[0.1] * 8, title="t", category="c")
+    assert res.basis == "semantic"
+
+
+def test_check_without_title_still_works_for_existing_callers():
+    """The new args are optional — the old two-gate call must behave as before."""
+    conn = _FakeConn(fetchone_result=None)
+    dd = _dedup(conn)
+    dd.check_url_hash = lambda url: DupCheckResult(False)
+    dd.check_title_hash = lambda t, c: DupCheckResult(True, 1, 1.0, "title_hash")
+    dd.check_semantic = lambda emb: DupCheckResult(False)
+    assert dd.check("https://ex/new", embedding=[0.1] * 8).is_dup is False
+
+
+# --------------------------------------------------------------------------- #
+# 3b-2  the gate in the write path: dead-letters dup:title, before embed()
+# --------------------------------------------------------------------------- #
+def test_pipeline_deadletters_title_dupes_as_dup_title(monkeypatch):
+    """A title dupe is dropped as a distinct, permanent ``dup:title`` reason and
+    never reaches the embedding call — so a known repost costs zero LLM spend."""
+    embedded: list[list[str]] = []
+    semantic_calls: list[object] = []
+
+    class _Dedup:
+        def check(self, url):
+            return SimpleNamespace(is_dup=False)
+
+        def check_title_hash(self, title, category):
+            return SimpleNamespace(is_dup=True)
+
+        def check_semantic(self, emb):
+            semantic_calls.append(emb)
+            return SimpleNamespace(is_dup=False)
+
+    class _Ext:
+        async def embed(self, texts):
+            embedded.append(texts)
+            return []
+
+        async def extract_batch(self, items):
+            return [SimpleNamespace(title="Gemini Pro free for students",
+                                    description="", url="https://ex/99",
+                                    confidence=0.9, category="student")]
+
+    marks: list[tuple] = []
+    writes: list[str] = []
+    monkeypatch.setattr(pipeline, "mark_raw_item_attempt",
+                        lambda conn, rid, reason, permanent: marks.append((rid, reason, permanent)))
+    monkeypatch.setattr(pipeline, "write_offer",
+                        lambda conn, verdict, normalized: (writes.append(1) or 1))
+
+    primary = SimpleNamespace(canonical="https://ex/99", final="https://ex/99")
+    survivors = [({"id": 99}, SimpleNamespace(), primary,
+                  SimpleNamespace(ok=False, status="live"))]
+    stats = {"llm_rejected": 0, "llm_unavailable": 0, "dup": 0,
+             "offers_written": 0, "errors": 0}
+
+    asyncio.run(pipeline._run_stage_b(None, _Dedup(), _Ext(), survivors, stats,
+                                      dry_run=False))
+
+    assert marks == [(99, "dup:title", True)]   # distinct reason, permanent
+    assert stats["dup"] == 1 and stats["offers_written"] == 0
+    assert writes == []
+    assert embedded == [] and semantic_calls == []   # gate ran BEFORE embed()
+
+
+def test_pipeline_title_gate_writes_nothing_in_dry_run(monkeypatch):
+    """dry_run must not dead-letter the row it merely previewed."""
+    class _Dedup:
+        def check(self, url):
+            return SimpleNamespace(is_dup=False)
+
+        def check_title_hash(self, title, category):
+            return SimpleNamespace(is_dup=True)
+
+    class _Ext:
+        async def embed(self, texts):
+            return []
+
+        async def extract_batch(self, items):
+            return [SimpleNamespace(title="t", description="", url="https://ex/99",
+                                    confidence=0.9, category="student")]
+
+    marks: list[tuple] = []
+    monkeypatch.setattr(pipeline, "mark_raw_item_attempt",
+                        lambda *a, **k: marks.append(a))
+
+    primary = SimpleNamespace(canonical="https://ex/99", final="https://ex/99")
+    survivors = [({"id": 99}, SimpleNamespace(), primary,
+                  SimpleNamespace(ok=False, status="live"))]
+    stats = {"llm_rejected": 0, "llm_unavailable": 0, "dup": 0,
+             "offers_written": 0, "errors": 0}
+
+    asyncio.run(pipeline._run_stage_b(None, _Dedup(), _Ext(), survivors, stats,
+                                      dry_run=True))
+    assert marks == [] and stats["dup"] == 1
