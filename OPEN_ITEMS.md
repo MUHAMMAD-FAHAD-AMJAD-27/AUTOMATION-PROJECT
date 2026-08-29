@@ -102,10 +102,14 @@ acts next:
   `LOGIN_TARGETS` now carries the auth cookie per platform (`auth_token` / `sessionid`) and
   `login()` refuses to save without it, naming the cookie and telling the operator to
   approve on the other device and **reload** before pressing Enter.
-- **Instagram handles: BLOCKED ON OWNER INPUT.** `DEFAULT_INSTAGRAM_HANDLES` at
-  `adapters/social_stealth.py:73` is deliberately empty, and `run_instagram` logs
-  "no handles configured — nothing to do" and returns 0. Nothing about Instagram can be
-  validated until a curated list is supplied. Asked 2026-08-29; do not guess handles.
+- **Instagram handles: SUPPLIED 2026-08-29 (owner-approved).** `DEFAULT_INSTAGRAM_HANDLES` at
+  `adapters/social_stealth.py:73` was deliberately empty; the owner approved a six-handle list
+  after the research pass: `opportunitydesk`, `opportunitiesforyouth`, `opportunitiesforafricans`,
+  `afterschoolafrica` (Group A — full URL typed in caption), `deeplearningai`, `mlhacks`
+  (Group B — bio link only, captions link-free). Caveat on record: all four Group A accounts
+  are global scholarship/grant aggregators (dev-tool relevance is a minority slice) and three
+  of the four hide destinations behind bit.ly/tinyurl/wp.me shorteners, so redirect-following
+  matters. A one-off dry-run capture is authorized; **still not wired into `scheduler.py`.**
 
 - **What would unblock it:** (a) ~~add `*.state.json` to `.gitignore`~~ **DONE 2026-08-29**;
   (b) ~~manually log in once and save `identities/<name>.state.json`~~ **DONE 2026-08-29 —
@@ -147,6 +151,31 @@ acts next:
   point: add root `package.json` (or subtree flow) → create `freebies-dashboard` app with
   `heroku/nodejs` → set `DATABASE_URL` + `DASHBOARD_API_KEY` → resolve the read/write auth
   tension → scale one web dyno.
+
+### 3.2 Live secrets exposed via `heroku releases:info` — rotation deferred by owner
+- **Status:** On 2026-08-29, `heroku releases:info -a freebies-hunter` was run and printed the
+  full v50 config-var set into the session transcript: the Neon `DATABASE_URL` (with password),
+  `LLM_API_KEY` (Groq), `LLM_FALLBACK_1_API_KEY` (OpenRouter), `LLM_FALLBACK_2_API_KEY`,
+  `FIRECRAWL_API_KEY`, and all 10 Discord webhook URLs. Nothing was transmitted anywhere; the
+  values sit in a local transcript file only.
+- **Decision on record (owner, 2026-08-29):** **rotation DEFERRED, not skipped.** Do not raise
+  again unless the owner brings it up (same discipline as §1 paused items).
+- **What would unblock / require it:** revisit **before any wider team access or public
+  deployment** — at that point rotate all six credential groups (webhooks cheapest, Neon
+  password highest-value). The mistake itself is corrected going forward: use
+  `heroku releases -n N` (release list only), never `releases:info` (dumps all config vars).
+
+### 3.3 Dashboard npm dependency vulnerabilities (next@14.2.35)
+- **Status:** `npm audit` in `dashboard/` reports **2 high-severity advisories** — `next`
+  (9.3.4-canary … 16.3.0-preview.10) and its bundled `postcss` (<=8.5.22). Classes: DoS via
+  Server Components / Image Optimizer, cache poisoning, XSS in App Router, SSRF in Server
+  Actions/rewrites; postcss path traversal + XSS in CSS stringify.
+- **Decision on record (owner, 2026-08-29):** **known issue, not urgent now** — the dashboard
+  runs local-only, so the network-facing attack surface is not exposed.
+- **What would unblock / require it:** the only fix is `npm audit fix --force`, which installs
+  `next@16.3.3` — a **breaking major-version upgrade** (App Router API changes). Resolve
+  **before any live dashboard deployment** (ties into §3.1); until then, do not run the forced
+  upgrade against the working local build.
 
 ---
 
