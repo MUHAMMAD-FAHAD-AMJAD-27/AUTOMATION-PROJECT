@@ -294,7 +294,8 @@ def parse_twitter_payloads(captured: list[dict]) -> list[dict]:
 
     A tweet result carries a ``legacy`` object with ``full_text``, ``id_str``,
     ``created_at`` and ``entities``; the author screen_name lives in the sibling
-    ``core.user_results...legacy.screen_name``. We accept any node that has a
+    ``core.user_results...core.screen_name`` (it used to live under that user's
+    ``legacy`` — both shapes are accepted). We accept any node that has a
     ``legacy`` with both ``full_text`` and ``id_str`` and pull URLs from the text
     plus the entity list. Only link-bearing tweets become raw items — a freebie
     without a destination URL is not actionable downstream — and a tweet whose
@@ -312,12 +313,18 @@ def parse_twitter_payloads(captured: list[dict]) -> list[dict]:
             if not tweet_id or not full_text or tweet_id in seen:
                 continue
 
-            # Author: look for a nested user screen_name within this tweet node.
+            # Author: X moved screen_name OFF the user result's ``legacy`` object
+            # into a sibling ``core`` — a real 2026 capture carries
+            # core.user_results.result.core.screen_name and no ``legacy`` on the
+            # user at all, which made 20/20 tweets fall back to "unknown". Accept
+            # screen_name from ANY node under the tweet's ``core`` so both shapes
+            # work; the search is scoped to ``core`` (the author subtree), so a
+            # mentioned or quoted user cannot be mistaken for the author.
             screen_name = None
             for sub in _iter_nodes(node.get("core")):
-                sub_legacy = sub.get("legacy")
-                if isinstance(sub_legacy, dict) and sub_legacy.get("screen_name"):
-                    screen_name = sub_legacy["screen_name"]
+                candidate = sub.get("screen_name")
+                if isinstance(candidate, str) and candidate:
+                    screen_name = candidate
                     break
 
             urls = extract_urls(full_text, extra=_tweet_urls(legacy))

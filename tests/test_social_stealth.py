@@ -244,6 +244,90 @@ def test_twitter_spam_floor_does_not_affect_the_baseline_fixture():
 
 
 # --------------------------------------------------------------------------- #
+# Author extraction across BOTH user-object shapes
+# --------------------------------------------------------------------------- #
+# Regression: X moved screen_name off the user result's ``legacy`` object into a
+# sibling ``core``. The first real capture had NO ``legacy`` on the user at all —
+# res.core was {"created_at": ..., "name": ..., "screen_name": ...} — so the
+# legacy-only lookup produced "twitter:unknown" for 20 of 20 tweet nodes, i.e.
+# every item lost its author. The fixture below reproduces that live shape
+# verbatim; the older legacy shape is still covered by _TWITTER_CAPTURE.
+_TWITTER_CAPTURE_CORE_AUTHOR = {
+    "url": "https://x.com/i/api/graphql/abc/SearchTimeline",
+    "body": {"data": {"search_by_raw_query": {"search_timeline": {"timeline": {
+        "instructions": [{"type": "TimelineAddEntries", "entries": [
+            {"content": {"itemContent": {"tweet_results": {"result": {
+                "rest_id": "2001",
+                # No "legacy" key on the user result — this is the 2026 shape.
+                "core": {"user_results": {"result": {
+                    "__typename": "User",
+                    "rest_id": "77",
+                    "core": {
+                        "created_at": "Mon Aug 05 11:53:18 +0000 2019",
+                        "name": "IELTS by IDP UAE",
+                        "screen_name": "ieltsbyidpuae",
+                    },
+                    "verification": {"verified": False},
+                }}},
+                "legacy": {
+                    "id_str": "2001",
+                    "full_text": "Free IELTS prep webinar https://t.co/y",
+                    "created_at": "Wed Aug 27 12:00:00 +0000 2026",
+                    "entities": {"urls": [
+                        {"url": "https://t.co/y",
+                         "expanded_url": "https://prep.example.com/ielts"},
+                    ]},
+                },
+            }}}}},
+        ]}],
+    }}}}},
+}
+
+
+def test_twitter_author_read_from_new_core_shape():
+    out = parse_twitter_payloads([_TWITTER_CAPTURE_CORE_AUTHOR])
+    assert len(out) == 1
+    assert out[0]["author_handle"] == "twitter:ieltsbyidpuae"
+
+
+def test_twitter_author_still_read_from_old_legacy_shape():
+    # Backward compatibility: X may serve either shape during a rollout.
+    assert parse_twitter_payloads([_TWITTER_CAPTURE])[0]["author_handle"] == "twitter:devdeals"
+
+
+def test_twitter_author_unknown_only_when_core_absent():
+    no_core = {"url": "u", "body": {"tweet_results": {"result": {
+        "rest_id": "3001",
+        "legacy": {
+            "id_str": "3001",
+            "full_text": "deal https://t.co/q",
+            "entities": {"urls": [{"url": "https://t.co/q",
+                                   "expanded_url": "https://example.com/deal"}]},
+        },
+    }}}}
+    assert parse_twitter_payloads([no_core])[0]["author_handle"] == "twitter:unknown"
+
+
+def test_twitter_author_not_taken_from_a_mentioned_user():
+    """The screen_name search is scoped to the tweet's ``core`` subtree, so a
+    mentioned user in ``legacy.entities`` cannot be mistaken for the author."""
+    capture = {"url": "u", "body": {"tweet_results": {"result": {
+        "rest_id": "4001",
+        "core": {"user_results": {"result": {"core": {"screen_name": "realauthor"}}}},
+        "legacy": {
+            "id_str": "4001",
+            "full_text": "h/t @someoneelse free credits https://t.co/w",
+            "entities": {
+                "urls": [{"url": "https://t.co/w",
+                          "expanded_url": "https://example.com/credits"}],
+                "user_mentions": [{"screen_name": "someoneelse"}],
+            },
+        },
+    }}}}
+    assert parse_twitter_payloads([capture])[0]["author_handle"] == "twitter:realauthor"
+
+
+# --------------------------------------------------------------------------- #
 # parse_instagram_payloads
 # --------------------------------------------------------------------------- #
 def test_instagram_parses_media_and_bio_link():
