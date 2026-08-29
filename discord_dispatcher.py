@@ -300,7 +300,9 @@ def claim_offers(
     # with no INSERT, no UPDATE, and no commit. It is an approximation of the
     # live claim ordering: brand-new offers have no dispatch row yet, so they
     # sort last (COALESCE created_at -> +infinity). Fine for a preview; the
-    # real claim path below is unchanged.
+    # real claim path below is unchanged. Ordering mirrors the live claim's
+    # oldest-first policy (o.first_seen ASC) so the preview shows the same offers
+    # the live run would pick, not the newest ones.
     if dry_run:
         with conn.cursor() as cur:
             cur.execute(
@@ -316,7 +318,7 @@ def claim_offers(
                   AND (d.id IS NULL OR d.status <> 'sent')
                   {cat_filter}
                 ORDER BY COALESCE(d.created_at, 'infinity'::timestamptz) ASC,
-                         o.first_seen DESC
+                         o.first_seen ASC
                 LIMIT %(limit)s
                 """,
                 params,
@@ -354,6 +356,16 @@ def claim_offers(
         #    step 2 reclaim existing pending/failed rows instead of
         #    creating duplicates that would collide on the UNIQUE
         #    constraint.
+        #
+        #    ORDER BY o.first_seen ASC (oldest-first) is load-bearing. It used to
+        #    be DESC: when more than `limit` offers had no dispatch row, only the
+        #    NEWEST `limit` got one, and every later run repeated that choice, so
+        #    a fresh burst of arrivals kept re-burying the same older offers.
+        #    Measured effect of that starvation on live data: median verified→sent
+        #    latency 0.07 h but p90 53.6 h and max 66.4 h, with 78 of 299 offers
+        #    sent more than a day late. Oldest-first makes the wait bounded — an
+        #    offer can be passed over at most until the queue ahead of it drains,
+        #    instead of indefinitely.
         cur.execute(
             f"""
             INSERT INTO dispatches (offer_id, channel, status)
@@ -366,7 +378,7 @@ def claim_offers(
                   WHERE d.offer_id = o.id AND d.channel = %(channel)s
               )
               {cat_filter}
-            ORDER BY o.first_seen DESC
+            ORDER BY o.first_seen ASC
             LIMIT %(limit)s
             ON CONFLICT (offer_id, channel) DO NOTHING
             """,

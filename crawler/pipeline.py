@@ -205,6 +205,63 @@ def mark_run(conn: psycopg.Connection, run_id: int, status: str, stats: dict) ->
     conn.commit()
 
 
+def has_undispatched_offers(conn: psycopg.Connection, channel: str = "discord") -> bool:
+    """True when at least one dispatchable offer has never been sent on ``channel``.
+
+    This is the dispatch gate. It replaces ``stats["offers_written"] > 0``, which
+    tied dispatching to *this* run happening to write a new offer: in a slot that
+    wrote nothing the dispatch stage was skipped entirely, so an offer that missed
+    an earlier slot's limit waited for the next slot that happened to write
+    something. Measured on live data, 10 of 55 runs wrote zero offers and
+    therefore dispatched nothing, which is a direct contributor to the 66-hour
+    worst-case verified-to-sent latency (median was ~4 minutes).
+
+    Cheap by design: a single EXISTS that short-circuits on the first hit, so the
+    common "nothing waiting" case costs one index probe per run.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM offers o
+                WHERE o.verification_status IN ('verified','live')
+                  AND o.is_active
+                  AND NOT EXISTS (
+                      SELECT 1 FROM dispatches d
+                      WHERE d.offer_id = o.id
+                        AND d.channel  = %s
+                        AND d.status   = 'sent'
+                  )
+            ) AS pending
+            """,
+            (channel,),
+        )
+        row = cur.fetchone()
+    return bool(row and row["pending"])
+
+
+def _repersist_run_stats(db_url: str, run_id: int, status: str, stats: dict) -> None:
+    """Re-write ``runs.stats`` after the dispatch stage has run.
+
+    ``mark_run`` fires *before* dispatch on purpose, so a crash mid-dispatch still
+    leaves a finished audit row. The side effect was that ``stats["dispatched"]``,
+    which only exists after dispatch returns, never reached the table — every
+    ``runs`` row had ``dispatched`` absent/NULL, and the DB could not answer "how
+    much did this run actually send?" despite 299 real sends.
+
+    Uses its own short-lived connection rather than holding the pipeline
+    connection open across the paced webhook sends (2.5 s per message), which on
+    Neon would risk an idle-timeout disconnect. Best-effort: bookkeeping must
+    never turn a successful dispatch into a failed run.
+    """
+    try:
+        with psycopg.connect(db_url, row_factory=dict_row, connect_timeout=5) as conn:
+            mark_run(conn, run_id, status, stats)
+    except Exception:  # noqa: BLE001 — metrics must never kill the run
+        log.exception("could not re-persist dispatch stats for run_id=%s", run_id)
+
+
 # --------------------------------------------------------------------------- #
 # Discord dispatch (in-process invocation of the dispatcher module)
 # --------------------------------------------------------------------------- #
@@ -415,6 +472,79 @@ async def _run_stage_b(
             )
 
 
+async def _run_ingest_stages(
+    conn: psycopg.Connection,
+    extractor: LLMExtractor,
+    rows: list[dict],
+    stats: dict,
+    dry_run: bool,
+    require_liveness: bool,
+) -> None:
+    """Stage A (normalize + prefilter + liveness) then Stage B (LLM extract + write).
+
+    Lifted verbatim out of ``run_pipeline`` so the dispatch stage can be reached
+    on runs that fetched nothing. This body used to sit inline *after* an early
+    ``return stats`` that fired when ``rows`` was empty, which meant a slot with
+    no new raw_items skipped dispatch entirely — even with offers sitting
+    undispatched. Behaviour for a non-empty ``rows`` is unchanged.
+    """
+    deduplicator = Deduplicator(conn)
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        canonicalizer = URLCanonicalizer(client)
+        probe = LivenessProbe(client)
+
+        # --- Stage A: normalize + local regex pre-filter + liveness --- #
+        # Cheap, per-item, no LLM cost. Survivors are queued for the
+        # batched LLM extraction stage below.
+        survivors: list[tuple[dict, Any, CanonicalURL, Any]] = []  # (row, normalized, primary, live)
+        for row in rows:
+            try:
+                normalized = normalize_raw_item(row)
+                if not normalized.urls:
+                    stats["no_url"] += 1
+                    # No URL can ever become an offer — dead-letter immediately.
+                    if not dry_run:
+                        mark_raw_item_attempt(conn, row["id"], "no_url", permanent=True)
+                    continue
+
+                prefilter_reason = heuristic_prefilter(normalized)
+                if prefilter_reason:
+                    stats["prefiltered"] = stats.get("prefiltered", 0) + 1
+                    log.debug("prefiltered raw_item %s (%s)", normalized.raw_item_id, prefilter_reason)
+                    # Regex prefilter is deterministic — the verdict won't change on retry.
+                    if not dry_run:
+                        mark_raw_item_attempt(
+                            conn, row["id"], f"prefiltered:{prefilter_reason}", permanent=True
+                        )
+                    continue
+
+                primary = await canonicalizer.canonicalize(normalized.urls[0])
+                live = await probe.probe(primary.final)
+                if require_liveness and live.status in ("dead", "soft_dead"):
+                    stats["liveness_reject"] += 1
+                    # A dead link may recover — retry a few times, then give up.
+                    if not dry_run:
+                        mark_raw_item_attempt(
+                            conn, row["id"], f"liveness:{live.status}", permanent=False
+                        )
+                    continue
+
+                survivors.append((row, normalized, primary, live))
+            except Exception as exc:  # noqa: BLE001 — one bad item never kills the run
+                stats["errors"] += 1
+                log.exception("item failed (prefilter/liveness): raw_item_id=%s", row["id"])
+                if not dry_run:
+                    mark_raw_item_attempt(
+                        conn, row["id"], f"error:{type(exc).__name__}", permanent=False
+                    )
+
+        # --- Stage B: batched LLM extraction (BATCH_SIZE items/call) --- #
+        # Sequential extract->write when distribution is OFF (default);
+        # concurrent extraction (bounded by LLM_MAX_CONCURRENT_BATCHES) with
+        # a still-sequential write stage when it is ON. See _run_stage_b.
+        await _run_stage_b(conn, deduplicator, extractor, survivors, stats, dry_run)
+
+
 # --------------------------------------------------------------------------- #
 # Main orchestrator
 # --------------------------------------------------------------------------- #
@@ -453,70 +583,33 @@ async def run_pipeline(
 
         rows = fetch_unprocessed(conn, source, limit)
         stats["fetched"] = len(rows)
-        if not rows:
+        if rows:
+            await _run_ingest_stages(
+                conn, extractor, rows, stats, dry_run, require_liveness
+            )
+        else:
             log.info("No unprocessed raw_items%s.", f" for source {source!r}" if source else "")
-            mark_run(conn, run_id, "success", stats)
-            return stats
 
-        deduplicator = Deduplicator(conn)
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            canonicalizer = URLCanonicalizer(client)
-            probe = LivenessProbe(client)
+        run_status = "success" if stats["errors"] == 0 else "partial"
+        mark_run(conn, run_id, run_status, stats)
 
-            # --- Stage A: normalize + local regex pre-filter + liveness --- #
-            # Cheap, per-item, no LLM cost. Survivors are queued for the
-            # batched LLM extraction stage below.
-            survivors: list[tuple[dict, Any, CanonicalURL, Any]] = []  # (row, normalized, primary, live)
-            for row in rows:
-                try:
-                    normalized = normalize_raw_item(row)
-                    if not normalized.urls:
-                        stats["no_url"] += 1
-                        # No URL can ever become an offer — dead-letter immediately.
-                        if not dry_run:
-                            mark_raw_item_attempt(conn, row["id"], "no_url", permanent=True)
-                        continue
+        # Evaluate the dispatch gate while this connection is still open — the
+        # dispatch stage itself runs after the `with conn:` block closes.
+        dispatch_due = False
+        if dispatch:
+            try:
+                dispatch_due = has_undispatched_offers(conn)
+            except Exception:  # noqa: BLE001 — never let the gate query kill a run
+                log.exception(
+                    "undispatched-offer check failed; falling back to the "
+                    "offers_written gate for this run"
+                )
+                dispatch_due = stats["offers_written"] > 0
 
-                    prefilter_reason = heuristic_prefilter(normalized)
-                    if prefilter_reason:
-                        stats["prefiltered"] = stats.get("prefiltered", 0) + 1
-                        log.debug("prefiltered raw_item %s (%s)", normalized.raw_item_id, prefilter_reason)
-                        # Regex prefilter is deterministic — the verdict won't change on retry.
-                        if not dry_run:
-                            mark_raw_item_attempt(
-                                conn, row["id"], f"prefiltered:{prefilter_reason}", permanent=True
-                            )
-                        continue
-
-                    primary = await canonicalizer.canonicalize(normalized.urls[0])
-                    live = await probe.probe(primary.final)
-                    if require_liveness and live.status in ("dead", "soft_dead"):
-                        stats["liveness_reject"] += 1
-                        # A dead link may recover — retry a few times, then give up.
-                        if not dry_run:
-                            mark_raw_item_attempt(
-                                conn, row["id"], f"liveness:{live.status}", permanent=False
-                            )
-                        continue
-
-                    survivors.append((row, normalized, primary, live))
-                except Exception as exc:  # noqa: BLE001 — one bad item never kills the run
-                    stats["errors"] += 1
-                    log.exception("item failed (prefilter/liveness): raw_item_id=%s", row["id"])
-                    if not dry_run:
-                        mark_raw_item_attempt(
-                            conn, row["id"], f"error:{type(exc).__name__}", permanent=False
-                        )
-
-            # --- Stage B: batched LLM extraction (BATCH_SIZE items/call) --- #
-            # Sequential extract->write when distribution is OFF (default);
-            # concurrent extraction (bounded by LLM_MAX_CONCURRENT_BATCHES) with
-            # a still-sequential write stage when it is ON. See _run_stage_b.
-            await _run_stage_b(conn, deduplicator, extractor, survivors, stats, dry_run)
-
-        mark_run(conn, run_id, "success" if stats["errors"] == 0 else "partial", stats)
-
-    if dispatch and stats["offers_written"] > 0:
+    # Dispatch whenever something is actually waiting, not only when THIS run
+    # wrote an offer. See has_undispatched_offers() for why the old
+    # `offers_written > 0` gate could hold an offer back for up to 66 hours.
+    if dispatch_due:
         try:
             # limit (not a hardcoded 10) so --limit / PIPELINE_LIMIT_PER_RUN
             # actually governs the dispatch tail and the backlog can drain.
@@ -525,6 +618,9 @@ async def run_pipeline(
         except Exception as exc:  # noqa: BLE001
             log.exception("dispatch stage failed: %s", exc)
             stats["dispatch_error"] = str(exc)
+        # Only now does stats carry the dispatch outcome; the mark_run above ran
+        # before dispatch, which is why runs.stats never contained "dispatched".
+        _repersist_run_stats(db_url, run_id, run_status, stats)
 
     log.info("pipeline done: %s", stats)
     return stats
