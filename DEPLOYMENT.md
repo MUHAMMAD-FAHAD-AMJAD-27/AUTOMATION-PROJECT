@@ -12,36 +12,41 @@ Telegram blocks.
 ```
 ┌───────────────────────────── Heroku app (region: us) ─────────────────────────────┐
 │                                                                                    │
-│  PROCESS TYPES                    ADD-ONS                                          │
+│  PROCESS TYPES                    DATA / ADD-ONS                                    │
 │  ┌──────────────────────┐        ┌──────────────────────────────┐                 │
-│  │ worker (1x, always)  │        │ Heroku Postgres (mini, $5)   │                 │
-│  │ python -m crawler.   │ ─────► │  - PG 15/16, 10 connections  │                 │
-│  │        worker        │        │  - ⚠️ NO pgvector: embeddings│                 │
-│  │  = Telegram realtime │        │    stored as REAL[], computed│                 │
-│  │    monitor + APSched │        │    app-side (fine <10k rows) │                 │
-│  └──────────────────────┘        └──────────────────────────────┘                 │
-│  ┌──────────────────────┐        ┌──────────────────────────────┐                 │
-│  │ web (Phase 4 only)   │        │ Heroku Redis (mini, $5)      │                 │
-│  │ Next.js dashboard    │ ─────► │  - rate-limit token buckets  │                 │
-│  │  (omit until then)   │        │  - dedup bloom, session cache│                 │
-│  └──────────────────────┘        └──────────────────────────────┘                 │
+│  │ scheduler (1x,always)│        │ Neon Postgres (external)     │                 │
+│  │ python scheduler.py  │ ─────► │  - permanent existing DB     │                 │
+│  │  = 27-slot orchestr. │        │  - ⚠️ NO pgvector: embeddings│                 │
+│  │    ingest+pipeline+  │        │    stored as REAL[], computed│                 │
+│  │    dispatch          │        │    app-side (fine <10k rows) │                 │
+│  └──────────────────────┘        │  - NOT a Heroku add-on:      │                 │
+│  ┌──────────────────────┐        │    DATABASE_URL set by hand  │                 │
+│  │ web  (scaled to 0)   │        └──────────────────────────────┘                 │
+│  │ Next.js dashboard    │                                                          │
+│  │  (built, not deployed)│                                                         │
+│  └──────────────────────┘        NO Heroku add-ons provisioned (see note below).  │
 │                                                                                    │
-│  ONE-OFF JOBS (free Heroku Scheduler add-on — NOT dynos):                          │
-│    ▸ python -m crawler.pipeline        daily @06:00 UTC   (ingest+normalize+verify)│
-│    ▸ python -m crawler.pipeline        daily @14:00 UTC                            │
-│    ▸ python -m crawler.pipeline        daily @22:00 UTC                            │
-│    ▸ python discord_dispatcher.py --limit 10   30 min after each ingest            │
-│    ▸ python run.py ingest-github       daily @05:30 UTC   (GitHub mega-lists)      │
-│    ▸ python run.py ingest-reddit       daily @05:45 UTC   (Reddit public JSON)     │
-│    ▸ python run.py ingest-hn           daily @05:50 UTC   (HN Algolia)             │
-│    ▸ python run.py ingest-mirrors      daily @05:55 UTC   (Linktree/Bento/TG web)  │
+│  The 27 slots run IN-PROCESS inside scheduler.py — one slot every ~53 min, each    │
+│  doing ingest → pipeline → dispatch. There are NO Heroku Scheduler one-off jobs    │
+│  and NO always-on worker: the scheduler process is the whole production runtime.   │
 └────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Why this shape:** the only thing that *must* run continuously is the Telegram monitor
-(short-poll keeps the MTProto session warm and catches floods early). Everything else is
-batch + idempotent, so it belongs in Scheduler one-offs — which only burn dyno hours
-*while executing*.
+**Why this shape:** the 27-slot in-process orchestrator (`scheduler.py`) already runs
+every ingest adapter *and* the pipeline *and* dispatch on a staggered cadence, so a
+single always-on dyno covers the entire batch runtime. The former plan (an always-on
+`worker` for the Telegram realtime monitor + separate Scheduler one-offs) was superseded:
+Telegram Tier-2 is dormant (no creds), and the one-offs folded into the slots.
+
+> **Redis was planned but never built.** Earlier drafts of this doc provisioned a
+> `heroku-redis:mini` add-on for rate-limit token buckets and a dedup bloom filter.
+> That was never implemented and no code references `REDIS_URL` or the `redis` package.
+> Rate limiting is handled **in-process** instead: the 27-slot scheduler serializes all
+> LLM work (`max_workers=1`, one slot at a time → zero concurrent LLM calls), the
+> dispatcher self-paces under Discord's 30 msg/min limit, and each adapter enforces its
+> own inter-request sleeps. Dedup is exact (sha256 fingerprints) + semantic (app-side
+> cosine over `REAL[]` embeddings) in Postgres — no Redis needed. **The live app runs
+> with zero add-ons.**
 
 ### Procfile
 
@@ -58,21 +63,26 @@ scaling `web` up would burn dyno hours for nothing.
 
 ### Add-on configuration
 
-| Add-on | Plan | $/mo | Why |
-|---|---|---|---|
-| ~~`heroku-postgresql`~~ | — | **$0** | **Not used. Neon is the permanent DB — do not provision.** |
-| `heroku-redis` | `mini` | $5 | 100 MB — rate buckets, dedup scratch |
-| `heroku-scheduler` | free | $0 | not required; the 27 slots run in-process |
-| **Eco dynos** | 1000 h/mo | $5 | shared pool: scheduler 744 h ≈ 74% of pool |
+**The live app runs with ZERO add-ons** (confirmed via `heroku addons`). The table
+below records what was *considered* and why each was dropped — so nobody re-provisions
+one thinking it's required.
 
-**Monthly burn ≈ $15 → covered by your $290.28 credits for ~19 months.**
+| Add-on | Status | $/mo | Why |
+|---|---|---|---|
+| ~~`heroku-postgresql`~~ | **never provision** | $0 | Neon is the permanent external DB. Provisioning one orphans all live data. |
+| ~~`heroku-redis`~~ | **planned, never built** | $0 | Rate limiting is in-process; dedup lives in Postgres. No code references `REDIS_URL`. |
+| ~~`heroku-scheduler`~~ | not used | $0 | The 27 slots run in-process inside `scheduler.py` — no one-off jobs. |
+| Dyno (scheduler) | **live** | ~$7 | One always-on Basic dyno running `python scheduler.py`. |
+
+**Monthly burn ≈ $7 (one Basic dyno, no add-ons) → covered by the $290.28 credits for
+years.** The live formation is `scheduler=1:Basic web=0` (verified via `heroku ps`).
 
 ### Config vars (never in git)
 
 ```
 DATABASE_URL          <- SET MANUALLY to the existing Neon pooler URL.
                          NOT injected by an add-on. Never provision a new Postgres.
-REDIS_URL             <- injected by the Redis add-on
+                         (No REDIS_URL: Redis was never built — see Add-on note.)
 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL      <- required; the pipeline cannot extract without these
 LLM_FALLBACK_1_* / LLM_FALLBACK_2_*         <- optional provider fallback chain
 DISCORD_WEBHOOK_URL   <- your webhook (plus optional per-category DISCORD_WEBHOOK_<CATEGORY>)
@@ -109,9 +119,16 @@ print(c.execute('select count(*) from raw_items').fetchone(), \
 heroku config:set LLM_API_KEY=... LLM_BASE_URL=... LLM_MODEL=...
 heroku config:set DISCORD_WEBHOOK_URL=...
 heroku config:set DISABLE_COLLECTSTATIC=1         # python buildpack hygiene
-heroku ps:scale scheduler=1:eco worker=0 web=0    # scheduler is the only always-on process
+heroku ps:scale scheduler=1:basic web=0           # LIVE formation (Basic, not Eco)
 git push heroku main
 ```
+
+> **Live formation note:** the deployed app runs on a **Basic** dyno
+> (`scheduler=1:Basic web=0`, verified via `heroku ps`), not Eco. Basic is a flat
+> ~$7/mo per always-on dyno with **no sleeping** and is **not** part of the 1000 h/mo
+> Eco pool — so the hour-budgeting math below is historical context from the Eco plan.
+> On Basic there is no hour cap to stay under; the only cost lever is how many dynos
+> run (one, here).
 
 Then add the Scheduler jobs (dashboard UI → Resources → Heroku Scheduler → Add job).
 
@@ -194,11 +211,11 @@ Launch checklist:
 
 | | Heroku (primary) | AWS FT (fallback) |
 |---|---|---|
-| Monthly cash | ~$15 from $290.28 credits (≈19 mo) | ~$0 |
+| Monthly cash | ~$7 (one Basic dyno, no add-ons) from $290.28 credits | ~$0 |
 | Setup time | ~1 h | ~0.5 day |
-| Ops burden | trivial (add-ons, scheduler) | systemd, self-managed PG |
+| Ops burden | trivial (single dyno, no add-ons) | systemd, self-managed PG |
 | pgvector | ❌ (REAL[] app-side) | ✅ (optional HNSW) |
-| Risk | Eco sleep quirks | Free-tier limit surprises |
+| Risk | none material (Basic dyno, no sleep) | Free-tier limit surprises |
 
 **Recommendation:** start on Heroku now (credits make it effectively free for a year+);
 revisit AWS only if you outgrow Heroku Postgres mini or want the vector index.

@@ -1,5 +1,11 @@
 -- Migration: add 'approved' to discovered_channels.status
 -- ========================================================
+-- STATUS: ALREADY APPLIED to the live Neon DB (verified 2026-08-29 — the live
+-- discovered_channels_status_check constraint includes 'approved'). This file is
+-- kept as a HISTORICAL record of the schema change, NOT a pending action. It is
+-- idempotent (DROP CONSTRAINT IF EXISTS + re-ADD), so re-running is harmless, but
+-- there is nothing to do here. Telegram auto-join remains dormant regardless.
+--
 -- Adds the human-review tier for the Telegram auto-join gate. Discovery writes
 -- rows as 'new'; a human promotes chosen rows to 'approved' (run.py
 -- approve-channel); _join_candidates joins only 'approved' rows, and only when
