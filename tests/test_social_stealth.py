@@ -185,13 +185,41 @@ def test_login_targets_map_to_runner_identity_names():
     assert ss.LOGIN_TARGETS["instagram"][0] == "ig-ro"
     assert ss.LOGIN_TARGETS["twitter"][1].startswith("https://")
     assert ss.LOGIN_TARGETS["instagram"][1].startswith("https://")
+    # Third element = the cookie that only exists on a genuinely authenticated
+    # session. Pre-auth cookies (csrftoken/mid/ig_did/guest_id) are set by merely
+    # loading the login page, so they cannot be used as the gate.
+    assert ss.LOGIN_TARGETS["twitter"][2] == "auth_token"
+    assert ss.LOGIN_TARGETS["instagram"][2] == "sessionid"
 
 
-def _mock_playwright_chain():
-    """Build an async_playwright() stand-in whose chain records its calls."""
+# Cookie inventories taken from the two REAL bootstraps (values redacted, lengths
+# preserved): a valid X session carries auth_token+ct0, a valid IG session carries
+# sessionid+ds_user_id. The IG failure mode that motivated the gate is the
+# `_IG_PREAUTH_COOKIES` set below — 6 cookies, plausible-looking, no session.
+_LOGGED_IN_COOKIES = [
+    {"name": "auth_token", "value": "a" * 40, "domain": ".x.com", "httpOnly": True},
+    {"name": "ct0", "value": "c" * 160, "domain": ".x.com", "httpOnly": False},
+    {"name": "sessionid", "value": "s" * 77, "domain": ".instagram.com", "httpOnly": True},
+    {"name": "ds_user_id", "value": "1" * 11, "domain": ".instagram.com", "httpOnly": False},
+]
+_IG_PREAUTH_COOKIES = [
+    {"name": n, "value": "v", "domain": ".instagram.com"}
+    for n in ("csrftoken", "datr", "dpr", "ig_did", "mid", "wd")
+]
+
+
+def _mock_playwright_chain(cookies=None):
+    """Build an async_playwright() stand-in whose chain records its calls.
+
+    ``cookies`` is what ``context.cookies()`` returns — defaults to a fully
+    logged-in inventory so the happy path saves. Pass a pre-auth list to exercise
+    the refusal gate."""
     page = AsyncMock()
     context = AsyncMock()
     context.new_page = AsyncMock(return_value=page)
+    context.cookies = AsyncMock(
+        return_value=_LOGGED_IN_COOKIES if cookies is None else cookies
+    )
     browser = AsyncMock()
     browser.new_context = AsyncMock(return_value=context)
     chromium = MagicMock()
@@ -244,6 +272,76 @@ def test_login_saves_instagram_identity_to_correct_path(tmp_path, monkeypatch):
 
     saved = context.storage_state.call_args.kwargs["path"]
     assert saved.endswith("ig-ro.state.json")
+
+
+# --------------------------------------------------------------------------- #
+# Login session verification (the auth-cookie gate)
+# --------------------------------------------------------------------------- #
+# Regression: the first real Instagram bootstrap hit the "log in on another
+# device" challenge. The desktop tab never picks that approval up on its own, so
+# the operator pressed Enter on a still-logged-out browser and login() silently
+# wrote a 1643-byte identity holding only 6 pre-auth cookies. The failure then
+# surfaced minutes later as an empty headless fetch, far from its cause. These
+# tests pin the gate that turns that into a loud refusal at bootstrap time.
+def test_login_refuses_to_save_when_auth_cookie_absent(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(ss, "IDENTITY_DIR", tmp_path)
+    monkeypatch.delenv("PROXY_URL", raising=False)
+    apw_cm, _chromium, browser, context = _mock_playwright_chain(
+        cookies=_IG_PREAUTH_COOKIES
+    )
+
+    with caplog.at_level(logging.ERROR), \
+         patch.object(ss, "async_playwright", return_value=apw_cm), \
+         patch.object(ss.asyncio, "to_thread", new=AsyncMock(return_value="")):
+        asyncio.run(ss.login("instagram"))
+
+    # Nothing written — a plausible-looking but sessionless identity file is worse
+    # than no file, because the fetch cannot tell the difference.
+    context.storage_state.assert_not_awaited()
+    assert not list(tmp_path.iterdir())
+    # And the operator is told what to do about it, not just that it failed.
+    msg = caplog.text
+    assert "sessionid" in msg
+    assert "RELOAD" in msg
+    # The browser still closes: the gate returns, it does not leak a window.
+    browser.close.assert_awaited_once()
+
+
+def test_login_refuses_when_auth_cookie_present_but_empty(tmp_path, monkeypatch):
+    """A name-only match is not proof — a cleared session can leave the cookie
+    name behind with an empty value."""
+    monkeypatch.setattr(ss, "IDENTITY_DIR", tmp_path)
+    monkeypatch.delenv("PROXY_URL", raising=False)
+    apw_cm, _chromium, _browser, context = _mock_playwright_chain(
+        cookies=[{"name": "auth_token", "value": "", "domain": ".x.com"}]
+    )
+
+    with patch.object(ss, "async_playwright", return_value=apw_cm), \
+         patch.object(ss.asyncio, "to_thread", new=AsyncMock(return_value="")):
+        asyncio.run(ss.login("twitter"))
+
+    context.storage_state.assert_not_awaited()
+
+
+def test_login_gate_checks_the_platform_specific_cookie(tmp_path, monkeypatch):
+    """An X session cookie must not satisfy an Instagram login (and vice versa) —
+    the gate is per-platform, not "any auth-looking cookie"."""
+    monkeypatch.setattr(ss, "IDENTITY_DIR", tmp_path)
+    monkeypatch.delenv("PROXY_URL", raising=False)
+    only_x = [{"name": "auth_token", "value": "a" * 40, "domain": ".x.com"}]
+
+    apw_cm, _c, _b, context = _mock_playwright_chain(cookies=only_x)
+    with patch.object(ss, "async_playwright", return_value=apw_cm), \
+         patch.object(ss.asyncio, "to_thread", new=AsyncMock(return_value="")):
+        asyncio.run(ss.login("instagram"))
+    context.storage_state.assert_not_awaited()
+
+    # Same cookie list, twitter platform -> saves.
+    apw_cm2, _c2, _b2, context2 = _mock_playwright_chain(cookies=only_x)
+    with patch.object(ss, "async_playwright", return_value=apw_cm2), \
+         patch.object(ss.asyncio, "to_thread", new=AsyncMock(return_value="")):
+        asyncio.run(ss.login("twitter"))
+    context2.storage_state.assert_awaited_once()
 
 
 # --------------------------------------------------------------------------- #

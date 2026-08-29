@@ -507,12 +507,20 @@ async def run_instagram(handles: list[str] | None = None, dry_run: bool = False)
 # --------------------------------------------------------------------------- #
 # One-time identity bootstrap — headed manual login (owner, interactive)
 # --------------------------------------------------------------------------- #
-# platform -> (identity name, login URL). The identity name MUST match the one
-# the headless runner uses (run_twitter -> "twitter-main", run_instagram ->
-# "ig-ro") so the login writes the exact file the fetch later reads.
-LOGIN_TARGETS: dict[str, tuple[str, str]] = {
-    "twitter": ("twitter-main", "https://x.com/login"),
-    "instagram": ("ig-ro", "https://www.instagram.com/accounts/login/"),
+# platform -> (identity name, login URL, auth cookie proving the login took).
+# The identity name MUST match the one the headless runner uses (run_twitter ->
+# "twitter-main", run_instagram -> "ig-ro") so the login writes the exact file the
+# fetch later reads. The third element is the cookie that only exists on a real
+# authenticated session — pre-auth device cookies (IG's csrftoken/mid/ig_did, X's
+# guest_id) are set merely by *visiting* the login page, so their presence proves
+# nothing. Checking the auth cookie is what separates "logged in" from "sat on the
+# login screen": a challenge (IG's "log in on another device") leaves a browser
+# that looks normal but carries no session, and saving that state silently
+# produces an identity that fails on first headless use, minutes later and far
+# from the cause.
+LOGIN_TARGETS: dict[str, tuple[str, str, str]] = {
+    "twitter": ("twitter-main", "https://x.com/login", "auth_token"),
+    "instagram": ("ig-ro", "https://www.instagram.com/accounts/login/", "sessionid"),
 }
 
 
@@ -526,8 +534,12 @@ async def login(platform: str) -> None:
     with. A mismatch here (e.g. bootstrapping via ``patchright codegen``, which
     uses its own default context) is a common cause of a session that works once
     and is then challenged on first headless use. Cannot run headless — this is
-    the one interactive step the scheduler dyno can never perform itself."""
-    name, url = LOGIN_TARGETS[platform]
+    the one interactive step the scheduler dyno can never perform itself.
+
+    Refuses to write the identity unless the platform's auth cookie is actually
+    present, so a challenged or abandoned login fails loudly here instead of
+    leaving a plausible-looking file that yields zero items later."""
+    name, url, auth_cookie = LOGIN_TARGETS[platform]
     identity = StealthIdentity(name)
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
@@ -544,6 +556,18 @@ async def login(platform: str) -> None:
                 f"\n>>> When you are fully logged in to {platform}, return here and press "
                 f"Enter to save the identity... ",
             )
+            cookies = await context.cookies()
+            if not any(c.get("name") == auth_cookie and c.get("value") for c in cookies):
+                log.error(
+                    "[%s] NOT saved — no %r cookie, so this browser is not logged in to %s. "
+                    "%d cookie(s) present, all pre-auth. If you saw a challenge screen "
+                    "(e.g. 'log in on another device'), approve it on your other device and "
+                    "then RELOAD this page before pressing Enter — the login tab does not "
+                    "pick the approval up on its own. Re-run --login to try again; the "
+                    "previous identity file, if any, was left untouched.",
+                    name, auth_cookie, platform, len(cookies),
+                )
+                return
             await identity.save_state(context)
             log.info("[%s] identity saved -> %s", name, identity.state_path)
         finally:
