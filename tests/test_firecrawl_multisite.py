@@ -158,3 +158,43 @@ def _iter_json_objects(text: str):
         obj, end = decoder.raw_decode(text, idx)
         yield json.dumps(obj)
         idx = end
+
+
+# --------------------------------------------------------------------------- #
+# Item 4 — per-site credit guard (rescrape window + per-run URL cap)
+# --------------------------------------------------------------------------- #
+def test_dealify_has_reduced_refresh_and_cap():
+    dealify = {s.handle: s for s in fc.TARGET_SITES}["dealify.com"]
+    # dealify is the biggest, slowest-changing catalog → monthly refresh, small cap.
+    assert dealify.rescrape_after_days == 30
+    assert dealify.max_urls_per_run == 40
+    # the high-yield default site keeps the standard cadence + default cap.
+    resourify = {s.handle: s for s in fc.TARGET_SITES}["resourify.com"]
+    assert resourify.rescrape_after_days == fc.RESCRAPE_AFTER_DAYS
+    assert resourify.max_urls_per_run == fc.DEFAULT_MAX_URLS_PER_RUN
+
+
+def test_run_firecrawl_caps_urls_per_run(monkeypatch):
+    """A large unseen catalog is scraped a bounded slice at a time, so a
+    cold-start cannot spike credits (dealify's 767-page burst)."""
+    monkeypatch.setattr(fc, "_get_client", lambda: object())
+    site = fc.SiteConfig("https://dealify.com", "/products/", "dealify.com",
+                         rescrape_after_days=30, max_urls_per_run=40)
+    monkeypatch.setattr(fc, "TARGET_SITES", [site])
+
+    # Map returns 100 offer URLs; dry-run keeps them all unseen (no source_id).
+    monkeypatch.setattr(fc, "_map_site",
+                        lambda app, s, cf: [f"{s.base_url}{s.path_fragment}p{i}" for i in range(100)])
+
+    scraped: list[list[str]] = []
+
+    def _fake_batch(app, urls):
+        scraped.append(list(urls))
+        return []
+
+    monkeypatch.setattr(fc, "_batch_scrape", _fake_batch)
+
+    asyncio.run(fc.run_firecrawl(dry_run=True))
+    assert scraped, "batch_scrape should have been called"
+    assert len(scraped[0]) == 40, f"expected cap of 40, scraped {len(scraped[0])}"
+
