@@ -64,23 +64,67 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # --------------------------------------------------------------------------- #
 # DB helpers
 # --------------------------------------------------------------------------- #
+def _fairness_oldest_fraction() -> float:
+    """Fraction of each fetch batch reserved for the OLDEST unprocessed items.
+
+    Env-overridable via FETCH_FAIRNESS_OLDEST_FRACTION (0.0–1.0). Default 0.5:
+    half the batch drains the aged tail, half keeps fresh arrivals flowing.
+    0.0 restores the old pure newest-first behavior; 1.0 is pure oldest-first.
+    """
+    raw = os.environ.get("FETCH_FAIRNESS_OLDEST_FRACTION", "").strip()
+    if not raw:
+        return 0.5
+    try:
+        frac = float(raw)
+    except ValueError:
+        log.warning("Invalid FETCH_FAIRNESS_OLDEST_FRACTION=%r; using 0.5", raw)
+        return 0.5
+    return min(1.0, max(0.0, frac))
+
+
 def fetch_unprocessed(conn: psycopg.Connection, source: str | None, limit: int) -> list[dict]:
-    """raw_items with no offers row yet (left join), newest first."""
-    sql = """
-        SELECT r.id, r.source_id, r.external_id, r.raw_payload, r.fetched_at,
-               s.name AS source_name, s.kind AS source_kind
+    """raw_items with no offers row yet, split between the oldest and newest tails.
+
+    A pure ``ORDER BY fetched_at DESC LIMIT n`` starved the aged tail: when more
+    than ``limit`` items were unprocessed, every run picked the same newest slice
+    and the oldest items were never examined (measured: ~48% of the corpus aged
+    out unreached while ingest outran drain). This splits the batch — a fairness
+    portion pulled oldest-first (``fetched_at ASC``) so the tail drains
+    deterministically each run, and the remainder newest-first so current arrivals
+    still flow. Union is deduped, so when fewer than ``limit`` items exist all are
+    returned exactly once.
+
+    This governs FETCH order (which raw_items enter LLM verification), which is
+    independent of DISPATCH order (which verified offers get sent, ordered
+    first_seen ASC in discord_dispatcher.claim_offers). Changing fetch fairness
+    does not touch dispatch ordering.
+    """
+    where = """
         FROM raw_items r
         JOIN sources s ON s.id = r.source_id
         WHERE s.enabled
           AND NOT r.permanently_rejected
           AND NOT EXISTS (SELECT 1 FROM offers o WHERE o.raw_item_id = r.id)
     """
-    params: list[Any] = []
-    if source:
-        sql += " AND s.name = %s"
-        params.append(source)
-    sql += " ORDER BY r.fetched_at DESC LIMIT %s"
-    params.append(limit)
+    cols = """
+        r.id, r.source_id, r.external_id, r.raw_payload, r.fetched_at,
+        s.name AS source_name, s.kind AS source_kind
+    """
+    src_clause = " AND s.name = %(source)s" if source else ""
+
+    oldest_n = int(limit * _fairness_oldest_fraction())
+    newest_n = limit - oldest_n
+    params: dict[str, Any] = {"source": source, "oldest_n": oldest_n, "newest_n": newest_n}
+
+    # UNION dedupes overlap when the pool is smaller than the two slices combined,
+    # so no raw_item is processed twice in a run. Each SELECT keeps its own
+    # ORDER BY inside a parenthesized subquery (required for per-branch LIMIT).
+    sql = f"""
+        WITH pool AS (SELECT {cols} {where} {src_clause})
+        (SELECT * FROM pool ORDER BY fetched_at ASC  LIMIT %(oldest_n)s)
+        UNION
+        (SELECT * FROM pool ORDER BY fetched_at DESC LIMIT %(newest_n)s)
+    """
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return list(cur.fetchall())
