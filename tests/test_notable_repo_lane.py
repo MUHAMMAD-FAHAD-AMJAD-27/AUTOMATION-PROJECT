@@ -204,7 +204,9 @@ class _FakeCursor:
         return []
 
     def fetchone(self):
-        return None
+        # notable_repo_exclusions() runs a COUNT(*) AS n first; default it to 0
+        # so the enabled-flag path computes an empty exclusion set on this fake.
+        return {"n": 0}
 
 
 class _FakeConn:
@@ -239,3 +241,117 @@ def test_claim_offers_no_hold_when_flag_enabled(monkeypatch):
     sql, params = insert
     assert "held_categories" not in sql
     assert "held_categories" not in params
+
+
+# --------------------------------------------------------------------------- #
+# Item 1 — notable_repo daily cap + diversity trim
+# --------------------------------------------------------------------------- #
+def test_env_int_reads_override_and_falls_back(monkeypatch):
+    monkeypatch.setenv("NOTABLE_REPO_DAILY_CAP", "3")
+    assert discord_dispatcher._env_int("NOTABLE_REPO_DAILY_CAP", 8) == 3
+    monkeypatch.setenv("NOTABLE_REPO_DAILY_CAP", "-2")   # negative → default
+    assert discord_dispatcher._env_int("NOTABLE_REPO_DAILY_CAP", 8) == 8
+    monkeypatch.setenv("NOTABLE_REPO_DAILY_CAP", "nan")  # invalid → default
+    assert discord_dispatcher._env_int("NOTABLE_REPO_DAILY_CAP", 8) == 8
+    monkeypatch.delenv("NOTABLE_REPO_DAILY_CAP", raising=False)
+    assert discord_dispatcher._env_int("NOTABLE_REPO_DAILY_CAP", 8) == 8
+
+
+def test_repo_org_from_url_handle_and_slug():
+    assert discord_dispatcher._repo_org("https://github.com/deepseek-ai/harness", None) == "deepseek-ai"
+    assert discord_dispatcher._repo_org("acme/tool", None) == "acme"
+    assert discord_dispatcher._repo_org(None, "SomeHandle") == "somehandle"
+    assert discord_dispatcher._repo_org(None, None) == ""
+
+
+def _repo_offer(oid: int, title: str, org: str):
+    return {"id": oid, "title": title, "author_handle": org,
+            "raw": {"github_repo": f"https://github.com/{org}/proj{oid}"},
+            "first_seen": oid}
+
+
+def test_diversify_spreads_across_orgs_and_topics():
+    # A trend wave: 4 near-duplicate "DeepSeek Harness" repos across distinct orgs,
+    # plus 3 unrelated repos. Picking 3 should NOT return three DSH clones.
+    cands = [
+        _repo_offer(1, "DeepSeek Harness desktop client", "org-a"),
+        _repo_offer(2, "DeepSeek Harness web client", "org-b"),
+        _repo_offer(3, "DeepSeek Harness routing suite", "org-c"),
+        _repo_offer(4, "DeepSeek Harness anchored standard", "org-d"),
+        _repo_offer(5, "Postgres vector search extension", "vendor-x"),
+        _repo_offer(6, "Rust terminal spreadsheet editor", "vendor-y"),
+        _repo_offer(7, "Kubernetes cost dashboard", "vendor-z"),
+    ]
+    chosen = discord_dispatcher._diversify(cands, 3)
+    assert len(chosen) == 3
+    dsh = sum(1 for c in chosen if "deepseek" in c["title"].lower())
+    assert dsh <= 1, f"expected the trend wave trimmed to ≤1, got {dsh}"
+
+
+def test_diversify_returns_all_when_k_exceeds_candidates():
+    cands = [_repo_offer(1, "one repo here", "a"), _repo_offer(2, "two repo here", "b")]
+    assert discord_dispatcher._diversify(cands, 5) == cands
+
+
+class _ScriptedCursor:
+    """Cursor whose fetchone/fetchall return queued results in call order."""
+
+    def __init__(self, results):
+        self._results = list(results)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self._current = self._results.pop(0)
+
+    def fetchone(self):
+        return self._current
+
+    def fetchall(self):
+        return self._current
+
+
+class _ScriptedConn:
+    def __init__(self, results):
+        self._results = results
+
+    def cursor(self, *a, **k):
+        return _ScriptedCursor(self._results)
+
+
+def test_exclusions_empty_when_held(monkeypatch):
+    monkeypatch.delenv("NOTABLE_REPO_DISPATCH_ENABLED", raising=False)
+    # Held: returns [] without touching the DB (no scripted results needed).
+    assert discord_dispatcher.notable_repo_exclusions(_ScriptedConn([]), "discord") == []
+
+
+def test_exclusions_none_when_under_budget(monkeypatch):
+    monkeypatch.setenv("NOTABLE_REPO_DISPATCH_ENABLED", "1")
+    monkeypatch.setenv("NOTABLE_REPO_DAILY_CAP", "8")
+    cands = [_repo_offer(1, "alpha repo", "a"), _repo_offer(2, "beta repo", "b")]
+    conn = _ScriptedConn([{"n": 0}, cands])   # 0 sent today, 2 candidates ≤ 8
+    assert discord_dispatcher.notable_repo_exclusions(conn, "discord") == []
+
+
+def test_exclusions_defers_surplus_over_budget(monkeypatch):
+    monkeypatch.setenv("NOTABLE_REPO_DISPATCH_ENABLED", "1")
+    monkeypatch.setenv("NOTABLE_REPO_DAILY_CAP", "2")
+    cands = [_repo_offer(i, f"repo {i} here", f"org{i}") for i in range(1, 6)]  # 5 candidates
+    conn = _ScriptedConn([{"n": 0}, cands])   # budget 2 → defer 3
+    excluded = discord_dispatcher.notable_repo_exclusions(conn, "discord")
+    assert len(excluded) == 3
+    assert set(excluded).issubset({c["id"] for c in cands})
+
+
+def test_exclusions_defers_all_when_cap_reached(monkeypatch):
+    monkeypatch.setenv("NOTABLE_REPO_DISPATCH_ENABLED", "1")
+    monkeypatch.setenv("NOTABLE_REPO_DAILY_CAP", "2")
+    cands = [_repo_offer(1, "alpha repo", "a"), _repo_offer(2, "beta repo", "b")]
+    conn = _ScriptedConn([{"n": 2}, cands])   # already 2 sent today → defer all
+    excluded = discord_dispatcher.notable_repo_exclusions(conn, "discord")
+    assert set(excluded) == {1, 2}
+

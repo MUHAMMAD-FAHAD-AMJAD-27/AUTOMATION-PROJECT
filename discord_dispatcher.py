@@ -47,6 +47,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -122,6 +123,165 @@ def held_dispatch_categories() -> tuple[str, ...]:
     return tuple(
         cat for cat, flag in HELD_DISPATCH_FLAGS.items() if not _env_truthy(flag)
     )
+
+
+# --------------------------------------------------------------------------- #
+# notable_repo daily cap + diversity trim (Item 1)
+# --------------------------------------------------------------------------- #
+# notable_repo is a discovery lane fed by GitHub-Trending: a single hot topic can
+# spawn a whole cluster of near-duplicate repos in one day (the DeepSeek-Harness
+# wave surfaced 6 of 19 offers in a single run). Releasing that lane unbounded
+# would flood the channel with one trend. So once NOTABLE_REPO_DISPATCH_ENABLED
+# is on, we (a) cap notable_repo sends per UTC day at NOTABLE_REPO_DAILY_CAP, and
+# (b) when more candidates than the remaining daily budget exist, keep the most
+# *diverse* subset (greedy max-coverage over {github org} ∪ {significant title
+# tokens}) rather than the arbitrary oldest-N. The rest are excluded from this
+# run via an offer-id filter threaded through claim_offers — they are neither
+# inserted, claimed, nor sent, but remain untouched in the DB for a later day
+# (nothing is deleted). Deal categories are entirely unaffected: the exclusion
+# list only ever contains notable_repo offer ids.
+NOTABLE_REPO_DAILY_CAP = 8
+
+# Generic words stripped before building a repo's diversity "tags", so unrelated
+# repos don't falsely cluster on boilerplate ("free ai tool ...").
+_DIVERSITY_STOPWORDS: frozenset[str] = frozenset({
+    "the", "for", "and", "with", "from", "your", "you", "this", "that", "are",
+    "was", "has", "have", "all", "any", "can", "get", "use", "new", "via", "not",
+    "but", "app", "api", "ml", "llm", "tool", "tools", "open", "source", "free",
+    "github", "repo", "repos", "cli", "sdk", "lib", "library", "framework",
+    "based", "using", "model", "models", "project", "code", "data", "self",
+    "hosted", "awesome", "list", "simple", "fast", "best",
+})
+
+# Split a title into candidate tokens on any run of non-alphanumerics.
+_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a non-negative int env override; fall back to default on unset/invalid."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        val = int(raw)
+    except ValueError:
+        log.warning("Invalid %s=%r; using default %d", name, raw, default)
+        return default
+    return val if val >= 0 else default
+
+
+def _repo_org(github_repo: str | None, author_handle: str | None) -> str:
+    """Best-effort GitHub org/owner for an offer, for org-diversity trimming."""
+    src = (github_repo or "").strip()
+    if src:
+        # Accept full URLs or "owner/name"; owner is the segment before the repo.
+        tail = src.split("github.com/", 1)[-1].strip("/")
+        parts = [p for p in tail.split("/") if p]
+        if parts:
+            return parts[0].lower()
+    return (author_handle or "").strip().lower()
+
+
+def _diversity_tags(offer: dict[str, Any]) -> frozenset[str]:
+    """Tags describing an offer's org + topic, used to spread the daily subset."""
+    raw = offer.get("raw") or {}
+    org = _repo_org(raw.get("github_repo"), offer.get("author_handle"))
+    tags: set[str] = set()
+    if org:
+        tags.add(f"org:{org}")
+    title = (offer.get("title") or "").lower()
+    for tok in _TOKEN_SPLIT.split(title):
+        if len(tok) >= 3 and tok not in _DIVERSITY_STOPWORDS:
+            tags.add(tok)
+    return frozenset(tags)
+
+
+def _diversify(candidates: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
+    """Pick k offers maximizing tag diversity (greedy max new-tag coverage).
+
+    candidates arrive oldest-first; ties in marginal coverage break to the
+    earliest (oldest) candidate, preserving bounded-latency intent."""
+    if k >= len(candidates):
+        return list(candidates)
+    remaining = list(enumerate(candidates))  # keep original order for tie-breaks
+    tag_cache = {i: _diversity_tags(c) for i, c in remaining}
+    chosen: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    while remaining and len(chosen) < k:
+        # max new tags; tie-break on smallest original index (oldest first_seen).
+        best_pos = max(
+            range(len(remaining)),
+            key=lambda p: (len(tag_cache[remaining[p][0]] - seen), -remaining[p][0]),
+        )
+        idx, cand = remaining.pop(best_pos)
+        chosen.append(cand)
+        seen |= tag_cache[idx]
+    return chosen
+
+
+def notable_repo_exclusions(conn: psycopg.Connection, channel: str) -> list[int]:
+    """Offer ids to exclude from this dispatch run to honor the notable_repo cap.
+
+    Returns [] when the lane is still held (the category-level hold_filter already
+    covers it) or when every pending candidate fits under the remaining daily
+    budget. Otherwise returns the surplus (least-diverse) notable_repo ids to skip
+    this run. Read-only — never mutates or deletes anything."""
+    if "notable_repo" in held_dispatch_categories():
+        return []
+    cap = _env_int("NOTABLE_REPO_DAILY_CAP", NOTABLE_REPO_DAILY_CAP)
+    day_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) AS n
+            FROM dispatches d
+            JOIN offers o ON o.id = d.offer_id
+            WHERE d.channel = %(channel)s
+              AND d.status = 'sent'
+              AND d.sent_at >= %(day_start)s
+              AND o.category = 'notable_repo'
+            """,
+            {"channel": channel, "day_start": day_start},
+        )
+        sent_today = cur.fetchone()["n"]
+        remaining = max(0, cap - sent_today)
+
+        cur.execute(
+            """
+            SELECT o.id, o.title, o.author_handle, o.raw, o.first_seen
+            FROM offers o
+            WHERE o.category = 'notable_repo'
+              AND o.verification_status IN ('verified','live')
+              AND o.is_active
+              AND NOT EXISTS (
+                  SELECT 1 FROM dispatches d
+                  WHERE d.offer_id = o.id
+                    AND d.channel = %(channel)s
+                    AND d.status = 'sent'
+              )
+            ORDER BY o.first_seen ASC
+            """,
+            {"channel": channel},
+        )
+        candidates = cur.fetchall()
+
+    if not candidates:
+        return []
+    if remaining <= 0:
+        log.info("notable_repo daily cap reached (%d sent today); holding %d candidate(s)",
+                 sent_today, len(candidates))
+        return [c["id"] for c in candidates]
+    if len(candidates) <= remaining:
+        return []
+    chosen_ids = {c["id"] for c in _diversify(candidates, remaining)}
+    excluded = [c["id"] for c in candidates if c["id"] not in chosen_ids]
+    log.info(
+        "notable_repo cap: %d sent today, budget %d, %d candidate(s) → keeping %d most-diverse, deferring %d",
+        sent_today, remaining, len(candidates), len(chosen_ids), len(excluded),
+    )
+    return excluded
 
 
 def resolve_webhook(category: str, default_url: str) -> str:
@@ -333,6 +493,17 @@ def claim_offers(
         hold_filter = "AND o.category <> ALL(%(held_categories)s)"
         params["held_categories"] = list(held)
 
+    # Item 1 — notable_repo daily cap + diversity trim. When the lane is live,
+    # compute the surplus notable_repo offer ids to defer this run (over the daily
+    # budget / least diverse) and exclude them from every offer-selecting query
+    # below. The list only ever holds notable_repo ids, so deal categories are
+    # untouched; deferred offers stay in the DB for a later day (never deleted).
+    id_filter = ""
+    exclude_ids = notable_repo_exclusions(conn, channel)
+    if exclude_ids:
+        id_filter = "AND o.id <> ALL(%(exclude_ids)s)"
+        params["exclude_ids"] = exclude_ids
+
     # DRY-RUN: preview ONLY — must not mutate the dispatches table.
     # Previously run_batch() called claim_offers() unconditionally and only
     # skipped the *webhook send* under dry_run, so a "preview" still ran the
@@ -362,6 +533,7 @@ def claim_offers(
                   AND (d.id IS NULL OR d.status <> 'sent')
                   {cat_filter}
                   {hold_filter}
+                  {id_filter}
                 ORDER BY COALESCE(d.created_at, 'infinity'::timestamptz) ASC,
                          o.first_seen ASC
                 LIMIT %(limit)s
@@ -386,6 +558,7 @@ def claim_offers(
               AND d.attempts >= %(max_reclaim)s
               {cat_filter}
               {hold_filter}
+              {id_filter}
             """,
             params,
         )
@@ -425,6 +598,7 @@ def claim_offers(
               )
               {cat_filter}
               {hold_filter}
+              {id_filter}
             ORDER BY o.first_seen ASC
             LIMIT %(limit)s
             ON CONFLICT (offer_id, channel) DO NOTHING
@@ -457,6 +631,7 @@ def claim_offers(
                          AND d2.status <> 'sent'
                          {cat_filter}
                          {hold_filter}
+                         {id_filter}
                        ORDER BY d2.created_at
                        LIMIT %(limit)s
                    )
