@@ -198,6 +198,33 @@ A fresh session should orient on this before anything else. As of 2026-08-29 pos
   above; no handles activated in the scheduler). Note: Twitter wiring is pushed to GitHub but
   **not yet deployed to Heroku** (see §0), so it is not live yet.
 
+- **INSTAGRAM: CLOSED — WILL NOT WIRE (owner decision 2026-08-30).** This is a terminal
+  decision, not a deferral; do not re-open or re-research it. The Instagram half is
+  fully built and proven (parser CLOSED `cc5f687`, identity `ig-ro.state.json` verified,
+  81 live items captured across five handles) — it works. It is deliberately **not**
+  activated because the *content* is off-mission, not because of any technical blocker:
+  - **Yield evidence (authorized dry-run, `cc5f687`):** of the six approved handles, four
+    (opportunitydesk, opportunitiesforyouth, opportunitiesforafricans, afterschoolafrica)
+    are **global scholarship/grant aggregators** — dev-tool / free-API / credit relevance
+    is a small minority slice of their output. Of the two dev-relevant handles, `mlhacks`
+    yielded **0** link-bearing items (bio-link only; the feed GraphQL query carries no
+    `external_url` node, so bio-link extraction never fires) and `deeplearningai` yielded
+    **4**, from inline mentions rather than a real offer link. Net first-hand yield of
+    on-mission offers is ~0–4/run against a login-bearing scrape of a hard-to-automate
+    surface — an unfavorable value/effort/risk ratio.
+  - **Risk side:** Instagram is more aggressive than X about challenging automated logins,
+    the single `ig-ro` identity has no proxy (`PROXY_URL` DECLINED on budget grounds), and
+    a forced re-login is a manual owner-only step. Wiring it into the 27-slot loop spends
+    account-safety budget for near-zero on-mission return.
+  - **Code stays in place (nothing deleted):** `run_instagram` + `parse_instagram_payloads`
+    remain in `adapters/social_stealth.py`, tested, and `DEFAULT_INSTAGRAM_HANDLES` remains
+    populated — so the lane can be revived later with a one-line scheduler gate if a
+    genuinely dev-focused IG source (captions carrying real offer links) is found. Until
+    such a source exists, `_run_instagram` is intentionally absent from `scheduler.py`.
+  **Bottom line:** Twitter/X = wired (once/day, all_deals run-1). Instagram = built, tested,
+  and permanently parked by decision. This closes §2.1; the only remaining open thread is the
+  Heroku deploy of the Twitter wiring, tracked in §0.
+
 ---
 
 ## §3 — Deferred / low priority (feasible, deliberately not now)
