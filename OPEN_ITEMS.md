@@ -1,6 +1,6 @@
 # Open Items — Developer-Freebies Intelligence Pipeline
 
-**Last updated:** 2026-08-29 (post-deploy closeout — 4 commits DEPLOYED to Heroku via dashboard "Deploy Branch", release v56 = `main @ 7a7d769d`; live-app verification passed clean)
+**Last updated:** 2026-08-30 (5-item execution batch — Items 1/3/4/5 DEPLOYED to Heroku via `git push heroku main`, release v58 = `main @ 23e53af6`; `NOTABLE_REPO_DISPATCH_ENABLED=1` flipped ON with the per-day topic-cluster cap live in the same slug; Item 2 dashboard in progress)
 
 > **Keep this file current.** It is the standing reference that survives context loss
 > between sessions. When an item resolves, move it to **§4 Closed** with its commit
@@ -23,35 +23,33 @@ acts next:
 
 ## §0 — CURRENT DEPLOY STATE (read this first)
 
-A fresh session should orient on this before anything else. As of 2026-08-29 post-deploy closeout:
+A fresh session should orient on this before anything else. As of 2026-08-30 (5-item execution batch):
 
-- **DEPLOYED AND LIVE.** All four items are now running on the live Heroku app
-  (`freebies-hunter`). Deploy was done via the Heroku dashboard **"Deploy Branch"** button
-  (the deliberate human safety gate — see §4.11), producing **release v56 = "Deploy 7a7d769d"**.
-  That slug is `main @ 7a7d769d`, a superset of the four feature commits (Item 1 `bd48f0f`,
-  Item 2 `c69f638`, Item 4a `6583960`, Item 4b `632a024`) plus the docs closeout `7a7d769`.
-  `origin/main` HEAD == `7a7d769`; the release matches the pushed HEAD exactly.
-- **Live-app health verified clean (2026-08-29 ~18:25 UTC).** The `scheduler` dyno (Basic) is
-  **up**; startup logs show all **27 APScheduler jobs** registered with **no tracebacks, no
-  adapter failures, no job failures**. `runs` table: every pipeline run today is `success`
-  (0 non-ok). Two expected dyno restarts are in the logs — the v56 deploy and a later v57
-  (owner re-set `FIRECRAWL_API_KEY`); both came back **up** immediately.
-- **No new-adapter activity yet — expected, not a failure.** `notable_repo` offer count is **0**,
-  and no offers/`raw_items` exist since the deploy restart, because none of the new adapters'
-  daily slots has fired post-deploy yet. **GitHub Trending** runs once/day at the
-  `open_source_repo` run-1 slot (**~02:40 UTC**); **Twitter (social_stealth)** and **Firecrawl
-  (aicredits.dev, dealify.com)** run once/day at the `all_deals` run-1 slot (**~07:07 UTC**).
-  First real evidence should appear after those slots run. Their `sources` rows register lazily
-  on first fetch, so their absence now is also expected.
-- **Live Neon DB is consistent with the deployed code.** The `notable_repo` category migration
-  was applied earlier this session — `offers_category_check` lists 16 categories incl.
-  `notable_repo` (392 offer rows untouched). `write_offer` will now accept repo rows.
-- **`NOTABLE_REPO_WEBHOOK_URL` is set on Heroku** (len 121, valid Discord webhook shape) but
-  **inert** — nothing dispatches to it until `NOTABLE_REPO_DISPATCH_ENABLED` is turned on. That
-  flag is **unset/off** by decision (§1.2), verified this closeout.
-- **What is waiting on a human:** only the later §1.2 decision — after real `notable_repo` rows
-  accumulate (post 02:40 UTC runs) and are reviewed, decide whether to flip
-  `NOTABLE_REPO_DISPATCH_ENABLED=1`. Nothing else is outstanding from the deploy.
+- **DEPLOYED AND LIVE — release v58 = "Deploy 23e53af6" (`main @ 23e53af6`).** Deployed via
+  `git push heroku main` (Heroku git remote), superseding the old dashboard "Deploy Branch"
+  path. The v58 slug carries four new scheduler-side commits on top of v56:
+  - **Item 1** `67b2604` — notable_repo per-day topic-cluster cap (`NOTABLE_REPO_DAILY_CAP=8`,
+    org+title-token diversity trimming) in `discord_dispatcher.py`.
+  - **Item 5** `b11c996` — fetch fairness (`fetch_unprocessed` oldest/newest split,
+    `FETCH_FAIRNESS_OLDEST_FRACTION` default 0.5) in `crawler/pipeline.py`.
+  - **Item 4** `e098ccd` — Firecrawl per-site credit guard (`max_urls_per_run`,
+    per-site `rescrape_after_days`; dealify → 30d/40-cap).
+  - **Item 3** `23e53af` — Instagram CLOSED-OUT docs (see §4).
+  Full suite green before push (230 passed). `scheduler` dyno (Basic) verified **up** after both
+  the v58 deploy restart and the config-var restart; startup logs show the Scheduler started with
+  all jobs registered, no tracebacks.
+- **`NOTABLE_REPO_DISPATCH_ENABLED=1` is now ON (owner decision 2026-08-30).** The per-day
+  topic-cluster cap (Item 1, commit `67b2604`) shipped in the SAME slug that the flag was flipped
+  on — the cap is live *before* dispatch was enabled, so no uncapped burst window ever existed.
+  `NOTABLE_REPO_WEBHOOK_URL` remains set (dedicated repo channel), so repo items post there, not
+  the deal channel. §1.2 is now resolved → see §4.
+- **New-adapter daily slots still gate first real output.** GitHub Trending ~02:40 UTC;
+  Twitter + Firecrawl (aicredits.dev, dealify.com) ~07:07 UTC. notable_repo dispatch will begin
+  once repo rows exist and a dispatch slot fires post-enable; the cap bounds it to ≤8/day.
+- **Live Neon DB unchanged and consistent** — no rows deleted; `notable_repo` category migration
+  from the prior session still applied.
+- **What is waiting on a human:** Item 2 (dashboard) is the only active build thread — next@14→16
+  upgrade, Phase 2-5 build, deploy to a separate Heroku app. Nothing else outstanding.
 
 ---
 
